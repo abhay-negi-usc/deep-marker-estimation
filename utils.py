@@ -64,29 +64,9 @@ def MarkerPoseEstimator(
     keypoints_tag_frame: np.ndarray,
     tf_W_Ccv: np.ndarray,
 ):
-    """
-    Estimate marker pose from a single RGB image.
-
-    Args:
-        image (np.ndarray): Input RGB image (HxWx3).
-        seg_model: Loaded segmentation model.
-        kp_model: Loaded keypoint regression model.
-        camera_matrix (np.ndarray): 3x3 intrinsic matrix.
-        dist_coeffs (np.ndarray): Distortion coefficients.
-        keypoints_tag_frame (np.ndarray): Keypoints in marker frame (Nx3).
-        tf_W_Ccv (np.ndarray): Camera to world transform (4x4).
-
-    Returns:
-        tf_marker (np.ndarray or None): Estimated 4x4 pose matrix.
-        seg_mask_img (PIL.Image): Binary segmentation mask.
-        overlay_img (PIL.Image): Original image with keypoints overlay.
-    """
-
-
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # seg_size = (640, 480)
-    seg_size = (image.shape[0], image.shape[1])  # Use original image size for segmentation
+    seg_size = (image.shape[1], image.shape[0])  # width, height
     resized_rgb = cv2.resize(image, seg_size)
 
     seg_transform = Compose([Normalize(max_pixel_value=1.0), ToTensorV2()])
@@ -95,8 +75,7 @@ def MarkerPoseEstimator(
     with torch.no_grad():
         seg_mask = torch.sigmoid(seg_model(img_tensor))
         seg_mask = (seg_mask > 0.5).float().cpu()
-
-    seg_mask_img = transforms.ToPILImage()(seg_mask.squeeze(0))
+        seg_mask_img = Image.fromarray(seg_mask.squeeze().numpy().astype(np.uint8) * 255)
 
     def compute_roi(seg, rgb):
         seg = np.array(seg)
@@ -105,24 +84,30 @@ def MarkerPoseEstimator(
         image_border_size = max(seg.shape)
 
         seg = cv2.copyMakeBorder(seg, image_border_size, image_border_size, image_border_size, image_border_size, cv2.BORDER_CONSTANT, value=0)
+        rgb = cv2.copyMakeBorder(rgb, image_border_size, image_border_size, image_border_size, image_border_size, cv2.BORDER_CONSTANT, value=0)
+
         tag_pixels = np.argwhere(seg == 255)
         if tag_pixels.size == 0:
             return None, None
 
         min_x, max_x = tag_pixels[:, 1].min(), tag_pixels[:, 1].max()
         min_y, max_y = tag_pixels[:, 0].min(), tag_pixels[:, 0].max()
-        center_x, center_y = (min_x + max_x) // 2, (min_y + max_y) // 2
+        center_x = int(np.floor((min_x + max_x) / 2))
+        center_y = int(np.floor((min_y + max_y) / 2))
         side = max(max_x - min_x, max_y - min_y) + 2 * padding
-        roi = rgb[center_y - side // 2:center_y + side // 2, center_x - side // 2:center_x + side // 2]
+        half_side = side // 2
 
-        import pdb; pdb.set_trace()
+        x0 = max(0, center_x - half_side)
+        x1 = center_x + half_side
+        y0 = max(0, center_y - half_side)
+        y1 = center_y + half_side
 
-        if roi.shape[0] != roi_size or roi.shape[1] != roi_size:
-            roi = cv2.resize(roi, (roi_size, roi_size))
-        coords = np.array([center_x - side // 2, center_x + side // 2, center_y - side // 2, center_y + side // 2])
+        roi = rgb[y0:y1, x0:x1]
+        roi = cv2.resize(roi, (roi_size, roi_size))  # always resize
+        coords = np.array([x0, x1, y0, y1]) - image_border_size
+
         return roi, coords
 
-    import pdb; pdb.set_trace()
     roi_img, roi_coords = compute_roi(seg_mask_img, resized_rgb)
     if roi_img is None:
         return None, seg_mask_img, Image.fromarray(image)
@@ -131,25 +116,27 @@ def MarkerPoseEstimator(
     roi_tensor = transform(image=roi_img)["image"].unsqueeze(0).float().to(DEVICE)
 
     with torch.no_grad():
-        keypoints = kp_model(roi_tensor).cpu().numpy().reshape(-1, 2)
+        keypoints_roi = kp_model(roi_tensor).cpu().numpy().reshape(-1, 2)
 
-    # Reproject keypoints back to full image
-    roi_w, roi_h = roi_img.shape[1], roi_img.shape[0]
-    width_scale = (roi_coords[1] - roi_coords[0]) / roi_w
-    height_scale = (roi_coords[3] - roi_coords[2]) / roi_h
-    keypoints_resized = np.stack([
-        keypoints[:, 0] * width_scale + roi_coords[0],
-        keypoints[:, 1] * height_scale + roi_coords[2]
-    ], axis=1)
+    # === Fixed reprojection ===
+    s = np.array(roi_img.shape[:2])  # (H, W)
+    x0, x1, y0, y1 = roi_coords
+    roi_center = np.array([(x0 + x1) / 2, (y0 + y1) / 2])
+    w = x1 - x0
+    h = y1 - y0
+    m = s / np.array([w, h])  # scale from image -> ROI
 
-    # Map back to original image
+    keypoints_img = (keypoints_roi - s / 2) / m + roi_center
+
+    # Optional: remap to original image resolution (if resized_rgb differs)
     H_orig, W_orig = image.shape[:2]
-    scale_x_back = W_orig / seg_size[0]
-    scale_y_back = H_orig / seg_size[1]
+    H_resized, W_resized = resized_rgb.shape[:2]
+    scale_x_back = W_orig / W_resized
+    scale_y_back = H_orig / H_resized
 
     keypoints_orig = np.stack([
-        keypoints_resized[:, 0] * scale_x_back,
-        keypoints_resized[:, 1] * scale_y_back
+        keypoints_img[:, 0] * scale_x_back,
+        keypoints_img[:, 1] * scale_y_back
     ], axis=1)
 
     success, rvec, tvec = cv2.solvePnP(
@@ -168,6 +155,7 @@ def MarkerPoseEstimator(
     overlay_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
 
     return tf_marker, seg_mask_img, overlay_pil
+
 
 def compute_2D_gridpoints(N=10,s=0.1): 
     # N = num squares, s = side length  
@@ -256,7 +244,8 @@ def build_lbcv_predictor(
         from keypoints_model.utils import xyzabc_to_tf, rvectvec_to_xyzabc
 
         tf_marker = None
-        seg_size = (640, 480)
+        # seg_size = (640, 480)
+        seg_size = (image.shape[0], image.shape[1])  # Use original image size for segmentation
 
         # Resize RGB image to match segmentation input
         resized_rgb = cv2.resize(image, seg_size)  # shape (H, W, 3)
@@ -304,33 +293,16 @@ def build_lbcv_predictor(
         with torch.no_grad():
             keypoints_roi = kp_model(roi_tensor).cpu().numpy().reshape(-1, 2)
 
-        # Step 1: remap from ROI (128×128) to resized RGB (640×480)
-        roi_height, roi_width = roi_img.shape[:2]
+        # Convert from ROI (128×128) to image coordinates
+        s = np.array(roi_img.shape[:2])  # (H, W)
+        img_roi_center_x = (roi_coords[0] + roi_coords[1]) / 2
+        img_roi_center_y = (roi_coords[2] + roi_coords[3]) / 2
+        roi_center = np.array([img_roi_center_x, img_roi_center_y])
         w = roi_coords[1] - roi_coords[0]
         h = roi_coords[3] - roi_coords[2]
+        m = s / np.array([w, h])  # per-axis scale
 
-        scale_x = w / roi_width
-        scale_y = h / roi_height
-
-        origin_x = roi_coords[0]
-        origin_y = roi_coords[2]
-
-        keypoints_in_resized_rgb = np.stack([
-            keypoints_roi[:, 0] * scale_x + origin_x,
-            keypoints_roi[:, 1] * scale_y + origin_y
-        ], axis=1)
-
-        # Step 2: remap from resized RGB (640×480) to original image
-        H_orig, W_orig = image.shape[:2]
-        H_resized, W_resized = resized_rgb.shape[:2]
-
-        scale_x_back = W_orig / W_resized
-        scale_y_back = H_orig / H_resized
-
-        keypoints_img = np.stack([
-            keypoints_in_resized_rgb[:, 0] * scale_x_back,
-            keypoints_in_resized_rgb[:, 1] * scale_y_back
-        ], axis=1)
+        keypoints_img = (keypoints_roi - s / 2) / m + roi_center
 
         success, rvec, tvec = cv2.solvePnP(
             objectPoints=keypoints_tag_frame,

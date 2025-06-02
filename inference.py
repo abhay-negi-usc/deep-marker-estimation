@@ -27,7 +27,7 @@ def detect_pose_opencv_marker(
             for i in range(4):
                 pt1 = tuple(pts[i])
                 pt2 = tuple(pts[(i + 1) % 4])
-                cv2.line(vis_image, pt1, pt2, color=(0, 255, 0), thickness=10)
+                cv2.line(vis_image, pt1, pt2, color=(0, 255, 0), thickness=5)
 
         rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, marker_length, camera_matrix, dist_coeffs)
 
@@ -75,7 +75,6 @@ def run_learning_based_marker_estimation(
         keypoints_tag_frame=keypoints_tag_frame,
     )
 
-
     # Set default tf_W_Ccv if not provided
     if tf_W_Ccv is None:
         tf_W_Ccv = np.eye(4)
@@ -91,7 +90,6 @@ def run_learning_based_marker_estimation(
         tf_W_Ccv=tf_W_Ccv,
     )
 
-
     return pose, seg_mask_img, overlay_img
 
 # === Parameters ===
@@ -100,15 +98,16 @@ camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
 dist_coeffs = np.array([0.1, -0.2, 0.0, 0.0, 0.0])
 aruco_dict_type = cv2.aruco.DICT_APRILTAG_36h11
 marker_length = 0.0798 
-tf_W_Ccv = np.array([
-    [-1, 0, 0, 0],
-    [0, -1, 0, 0],
-    [0,  0, 1, 0],
-    [0,  0, 0, 1]
-])
+# tf_W_Ccv = np.array([
+#     [-1, 0, 0, 0],
+#     [0, -1, 0, 0],
+#     [0,  0, 1, 0],
+#     [0,  0, 0, 1]
+# ])
+tf_W_Ccv = np.eye(4) 
 
 # === Load and process image ===
-image_path = "./example_easy.png"
+image_path = "./example2_small.png"
 image_bgr = cv2.imread(image_path)
 image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)  # For matplotlib
 
@@ -121,8 +120,7 @@ vis_img_rgb = cv2.cvtColor(vis_img_bgr, cv2.COLOR_BGR2RGB)
 # --- Learning-Based Detection ---
 pose_lbcv, seg_mask_img, overlay_img = run_learning_based_marker_estimation(
     image_path=image_path,
-    seg_model_path="./segmentation_model/segmentation_checkpoint.tar",
-    # kp_model_path="./keypoints_model/keypoints_checkpoint.pth.tar",
+    seg_model_path="./segmentation_model/my_checkpoint_20250329.pth.tar",
     kp_model_path= "./keypoints_model/my_checkpoint_keypoints_20250330.pth.tar", 
     camera_matrix=camera_matrix,
     dist_coeffs=dist_coeffs,
