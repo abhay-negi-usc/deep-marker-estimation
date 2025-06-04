@@ -156,7 +156,6 @@ def MarkerPoseEstimator(
 
     return tf_marker, seg_mask_img, overlay_pil
 
-
 def compute_2D_gridpoints(N=10,s=0.1): 
     # N = num squares, s = side length  
     u = np.linspace(-s/2, +s/2, N+1) 

@@ -120,7 +120,7 @@ vis_img_rgb = cv2.cvtColor(vis_img_bgr, cv2.COLOR_BGR2RGB)
 # --- Learning-Based Detection ---
 pose_lbcv, seg_mask_img, overlay_img = run_learning_based_marker_estimation(
     image_path=image_path,
-    seg_model_path="./segmentation_model/my_checkpoint_20250329.pth.tar",
+    seg_model_path="./segmentation_model/my_checkpoint_segmentation_20250329.pth.tar",
     kp_model_path= "./keypoints_model/my_checkpoint_keypoints_20250330.pth.tar", 
     camera_matrix=camera_matrix,
     dist_coeffs=dist_coeffs,
