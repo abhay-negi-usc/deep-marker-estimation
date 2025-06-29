@@ -107,7 +107,8 @@ marker_length = 0.0798
 tf_W_Ccv = np.eye(4) 
 
 # === Load and process image ===
-image_path = "./example2_small.png"
+# image_path = "./example2_small.png"
+image_path = "./aruco6x6/IMG_6287.jpg"
 image_bgr = cv2.imread(image_path)
 image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)  # For matplotlib
 
@@ -120,7 +121,7 @@ vis_img_rgb = cv2.cvtColor(vis_img_bgr, cv2.COLOR_BGR2RGB)
 # --- Learning-Based Detection ---
 pose_lbcv, seg_mask_img, overlay_img = run_learning_based_marker_estimation(
     image_path=image_path,
-    seg_model_path="./segmentation_model/my_checkpoint_segmentation_20250329.pth.tar",
+    seg_model_path="/home/nom4d/marker_ws/segmentation_checkpoints/my_checkpoint_multimarker_epoch_0_batch_10000.pth.tar",
     kp_model_path= "./keypoints_model/my_checkpoint_keypoints_20250330.pth.tar", 
     camera_matrix=camera_matrix,
     dist_coeffs=dist_coeffs,
