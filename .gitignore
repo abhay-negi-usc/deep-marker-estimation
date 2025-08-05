@@ -1,4 +1,4 @@
 keypoints_model/*.tar 
 segmentation_model/*.tar
 *.pyc 
-aruco6x6
+test_images
