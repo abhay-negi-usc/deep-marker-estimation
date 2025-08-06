@@ -4,8 +4,8 @@ import cv2
 from scipy.spatial.transform import Rotation as R
 import torch 
 
-from utils.image_utils import * 
-from utils.homography_utils import * 
+from deep_marker_estimation.utils.image_utils import * 
+from deep_marker_estimation.utils.homography_utils import * 
 
 def convert_marker_keypoints_to_cartesian(keypoints_image_space, image_size, marker_size=(0.1, 0.1)): 
     """
@@ -279,7 +279,7 @@ def pattern_based_pose_estimation(image, seg, tf_init, marker_config, camera_con
 
     tf_cam_marker, residual = refine_pose_icp_3d2d_auto_match(
         np.array(image), keypoints_marker_cartesian_space, keypoints_rgb_image_space, camera_matrix,
-        tf_init, max_iterations=max_iterations, show_iteration_images=True, max_keypoints_est_2d=max_keypoints_est_2d, output_final_image=False,
+        tf_init, max_iterations=max_iterations, show_iteration_images=False, max_keypoints_est_2d=max_keypoints_est_2d, output_final_image=True,
     )
     image_similarity_score = compute_image_similarity_score(image, img_marker, marker_length, tf_cam_marker, camera_matrix, dist_coeffs)
     return tf_cam_marker, image_similarity_score 

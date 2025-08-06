@@ -6,8 +6,8 @@ from albumentations.pytorch import ToTensorV2
 import albumentations as A
 import matplotlib.pyplot as plt
 
-from segmentation_model.model import UNETWithDropout, UNETWithDropoutMini
-from segmentation_model.utils import load_checkpoint
+from deep_marker_estimation.segmentation_model.model import UNETWithDropout, UNETWithDropoutMini
+from deep_marker_estimation.segmentation_model.utils import load_checkpoint
 
 import numpy as np
 from math import gcd

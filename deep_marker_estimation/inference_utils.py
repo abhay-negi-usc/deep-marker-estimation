@@ -7,14 +7,13 @@ from albumentations.pytorch import ToTensorV2
 from torchvision import transforms
 from PIL import Image
 from scipy.spatial.transform import Rotation as R
-
-from segmentation_model.model import UNETWithDropout
-from segmentation_model.utils import load_checkpoint as load_seg_ckpt
-from keypoints_model.model import RegressorMobileNetV3
-from keypoints_model.utils import load_checkpoint as load_kp_ckpt
-# from keypoints_model.utils import xyzabc_to_tf, rvectvec_to_xyzabc
 from albumentations.pytorch import ToTensorV2
 import albumentations as A
+
+from deep_marker_estimation.segmentation_model.model import UNETWithDropout
+from deep_marker_estimation.segmentation_model.utils import load_checkpoint as load_seg_ckpt
+from deep_marker_estimation.keypoints_model.model import RegressorMobileNetV3
+from deep_marker_estimation.keypoints_model.utils import load_checkpoint as load_kp_ckpt
 
 def rvectvec_to_xyzabc(rvec, tvec): 
     rot = cv2.Rodrigues(rvec)[0] 

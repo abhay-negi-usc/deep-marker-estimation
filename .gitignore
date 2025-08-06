@@ -2,3 +2,8 @@ keypoints_model/*.tar
 segmentation_model/*.tar
 *.pyc 
 test_images
+marker_env_test 
+deep_marker_estimation.egg-info
+deep_marker_estimation/__pycache__
+# */__pycache__
+*.tar 

@@ -6,16 +6,16 @@ import os
 from PIL import Image
 
 # utility functions 
-from utils.image_utils import *
-from utils.seg_utils import * 
-from utils.keypoint_utils import * 
-from utils.pose_estimation_utils import * 
-from utils.homography_utils import *
-from utils.pattern_based_estimation_utils import *
+from deep_marker_estimation.utils.image_utils import *
+from deep_marker_estimation.utils.seg_utils import * 
+from deep_marker_estimation.utils.keypoint_utils import * 
+from deep_marker_estimation.utils.pose_estimation_utils import * 
+from deep_marker_estimation.utils.homography_utils import *
+from deep_marker_estimation.utils.pattern_based_estimation_utils import *
 
 # configurations 
 # configure marker properties 
-img_marker_path = "./utils/tag36h11_0.png"
+img_marker_path = "./deep_marker_estimation/utils/tag36h11_0.png"
 img_marker = cv2.imread(img_marker_path)
 keypoints_marker_image_space = find_keypoints(img_marker)
 keypoints_marker_cartesian_space = convert_marker_keypoints_to_cartesian(
@@ -41,13 +41,13 @@ config_camera = {
 # configure segmentation model  
 config_segmentation = {
     # "checkpoint_path": "./segmentation_model/segmentation_checkpoint_20250329.pth.tar",
-    "checkpoint_path": "./segmentation_model/my_checkpoint_minimodel_epoch_47_batch_0.pth.tar",
+    "checkpoint_path": "./deep_marker_estimation/segmentation_model/my_checkpoint_minimodel_epoch_47_batch_0.pth.tar",
     "input_size": (480, 640), 
     "segmentation_threshold": 0.5,  
 }
 # configure keypoint model
 config_keypoint = {
-    "checkpoint_path": "./keypoints_model/keypoints_checkpoint_20250330.pth.tar", 
+    "checkpoint_path": "./deep_marker_estimation/keypoints_model/keypoints_checkpoint_20250330.pth.tar", 
     "roi_size": 128 # size to which the ROI will be resized, 
 }
 # configure pattern-based pose estimation
@@ -58,7 +58,7 @@ config_pattern_based = {
 
 # marker segmentation 
 # read image
-image_path = "./test_images/picture_54.png"
+image_path = "./test_images/marker_ablation_examples/underexposure_dark.png"
 # check if image exists
 if not os.path.exists(image_path):
     raise FileNotFoundError(f"Image not found at {image_path}")
@@ -73,9 +73,6 @@ plt.imshow(marker_segmentation, cmap='gray')
 plt.title('Segmented Marker')
 plt.axis('off')
 plt.show()
-
-import pdb; pdb.set_trace()  # Debugging breakpoint
-
 
 # learning based pose estimation 
 # perform keypoint estimation

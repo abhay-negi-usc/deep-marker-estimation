@@ -4,8 +4,8 @@ import torch
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-from keypoints_model.utils import load_checkpoint
-from keypoints_model.model import RegressorMobileNetV3
+from deep_marker_estimation.keypoints_model.utils import load_checkpoint
+from deep_marker_estimation.keypoints_model.model import RegressorMobileNetV3
 
 def compute_roi(seg, rgb, roi_size=128):
     seg = np.array(seg)
