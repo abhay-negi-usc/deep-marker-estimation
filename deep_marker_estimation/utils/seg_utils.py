@@ -103,6 +103,36 @@ def combine_tiles_and_coords(tiles, coords, image_shape):
 
     return combined_image.astype(tiles[0].dtype)
 
+def combine_tiles_and_coords_max(tiles, coords, image_shape):
+    """
+    Combines tiles back into a full image using the maximum value for overlapping pixels.
+
+    Args:
+        tiles (List[np.ndarray]): List of image tiles (H, W) or (H, W, C) or (1, H, W)
+        coords (List[Tuple[int, int]]): Top-left (y, x) coordinates for each tile
+        image_shape (Tuple[int, int] or Tuple[int, int, int]): Shape of final image (H, W[, C])
+
+    Returns:
+        np.ndarray: Combined image
+    """
+    # Prepare output array
+    combined_image = np.zeros(image_shape, dtype=tiles[0].dtype)
+
+    for tile, (y, x) in zip(tiles, coords):
+        # Convert (1, H, W) → (H, W)
+        if tile.ndim == 3 and tile.shape[0] == 1:
+            tile = tile[0]
+
+        h, w = tile.shape[:2]
+
+        # Take elementwise max
+        combined_image[y:y + h, x:x + w] = np.maximum(
+            combined_image[y:y + h, x:x + w],
+            tile
+        )
+
+    return combined_image
+
 import torch
 import numpy as np
 import cv2
@@ -176,7 +206,7 @@ def segment_marker(image, config_segmentation):
         seg_tiles.append(seg_mask_resized)
 
     # Stitch back
-    seg = combine_tiles_and_coords(seg_tiles, image_tiles_coords, image.shape[:2])
+    seg = combine_tiles_and_coords_max(seg_tiles, image_tiles_coords, image.shape[:2])
 
     return seg
 

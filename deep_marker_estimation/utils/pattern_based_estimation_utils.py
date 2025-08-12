@@ -75,16 +75,25 @@ def refine_pose_icp_3d2d_auto_match(
 
     # --- Initial estimate ---
     if tf_init is not None:
-        R_init = tf_init[:3, :3]
-        t_init = tf_init[:3, 3]
+        if isinstance(tf_init, (tuple, list)) and len(tf_init) == 2:
+            R_init = np.asarray(tf_init[0], dtype=np.float32).reshape(3, 3)
+            t_init = np.asarray(tf_init[1], dtype=np.float32).reshape(3, 1)
+            tf_init = np.eye(4) 
+            tf_init[:3,:3] = R_init 
+            tf_init[:3,3] = t_init.reshape(3) 
+        else:
+            T = np.asarray(tf_init, dtype=np.float32).reshape(4, 4)
+            R_init = T[:3, :3]
+            t_init = T[:3, 3:4]
         rvec, _ = cv2.Rodrigues(R_init)
-        tvec = t_init.reshape(3, 1).astype(np.float32)
+        tvec = t_init.copy()
     else:
         rvec = np.zeros((3, 1), dtype=np.float32)
         tvec = np.zeros((3, 1), dtype=np.float32)
 
     if dist_coeffs is None:
         dist_coeffs = np.zeros((5, 1), dtype=np.float32)
+        
     camera_matrix = np.asarray(camera_matrix, dtype=np.float32)
     keypoints_ref_3d = np.array(keypoints_ref_3d).reshape(-1, 3)
 
@@ -97,6 +106,7 @@ def refine_pose_icp_3d2d_auto_match(
         keypoints_est_2d = keypoints_est_2d[sorted_indices[:max_keypoints_est_2d]]
 
     residual_history, eul_history, tvec_history = [], [], []
+
 
     tf_est = tf_init 
 
@@ -175,7 +185,7 @@ def refine_pose_icp_3d2d_auto_match(
 
         else:
             print(f"Iteration {i}: Not enough inlier points to solvePnP.")
-            break
+            break    
 
     # --- Plots ---
     if plot_residual and residual_history:
@@ -267,7 +277,6 @@ def pattern_based_pose_estimation(image, seg, tf_init, marker_config, camera_con
     max_keypoints_est_2d = pattern_based_config.get('max_keypoints_est_2d', 100)
 
     seg = segmentation_biggest_blob_filter(seg, min_area=1000)
-
     keypoints_rgb_image_space = find_keypoints(image, seg, maxCorners=100, qualityLevel=0.1, minDistance=10, blockSize=7)    
 
     # visualize keypoints on the image
@@ -281,6 +290,8 @@ def pattern_based_pose_estimation(image, seg, tf_init, marker_config, camera_con
         np.array(image), keypoints_marker_cartesian_space, keypoints_rgb_image_space, camera_matrix,
         tf_init, max_iterations=max_iterations, show_iteration_images=False, max_keypoints_est_2d=max_keypoints_est_2d, output_final_image=True,
     )
+
     image_similarity_score = compute_image_similarity_score(image, img_marker, marker_length, tf_cam_marker, camera_matrix, dist_coeffs)
+
     return tf_cam_marker, image_similarity_score 
 
