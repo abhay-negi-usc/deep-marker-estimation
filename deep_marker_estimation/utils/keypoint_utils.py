@@ -7,6 +7,93 @@ from albumentations.pytorch import ToTensorV2
 from deep_marker_estimation.keypoints_model.utils import load_checkpoint
 from deep_marker_estimation.keypoints_model.model import RegressorMobileNetV3
 
+import os, threading
+import torch
+try:
+    DEVICE
+except NameError:
+    DEVICE = "cpu"
+
+_KP_MODEL_CACHE = {}
+_KP_LOCK = threading.Lock()
+
+def load_keypoint_model(checkpoint_path: str, device: str = DEVICE):
+    ckpt_abs = os.path.abspath(checkpoint_path)
+    key = (ckpt_abs, str(device))
+    with _KP_LOCK:
+        m = _KP_CACHE.get(key)
+        if m is not None:
+            return m
+
+        # 1) TorchScript
+        try:
+            m = torch.jit.load(ckpt_abs, map_location=device)
+            m.eval()
+            _KP_CACHE[key] = m
+            print(f"[DME] KP TorchScript loaded once from: {ckpt_abs}")
+            return m
+        except Exception:
+            pass
+
+        obj = torch.load(ckpt_abs, map_location=device)
+
+        # 2) pickled nn.Module
+        if hasattr(obj, "forward"):
+            m = obj.to(device).eval()
+            for p in m.parameters(): p.requires_grad = False
+            _KP_CACHE[key] = m
+            print(f"[DME] KP nn.Module (pickled) loaded once from: {ckpt_abs}")
+            return m
+
+        # 3) state_dict (raw or in 'state_dict')
+        if isinstance(obj, dict):
+            state = obj.get("state_dict", obj) if _looks_like_state_dict(obj) or ("state_dict" in obj) else None
+            if state is not None:
+                m = RegressorMobileNetV3().to(device)
+                m.load_state_dict(state, strict=False)
+                m.eval()
+                for p in m.parameters(): p.requires_grad = False
+                _KP_CACHE[key] = m
+                print(f"[DME] KP state_dict loaded once into RegressorMobileNetV3 from: {ckpt_abs}")
+                return m
+
+        raise RuntimeError(f"Unsupported keypoint checkpoint format at {ckpt_abs}: {type(obj)}")
+
+import os, threading, torch
+
+try:
+    DEVICE
+except NameError:
+    DEVICE = "cpu"
+
+_KP_CACHE = {}
+_KP_LOCK = threading.Lock()
+
+def _looks_like_state_dict(obj):
+    if not isinstance(obj, dict) or not obj:
+        return False
+    import numpy as _np
+    return all(isinstance(k, str) for k in obj.keys()) and \
+           all(torch.is_tensor(v) or isinstance(v, _np.ndarray) for v in obj.values())
+
+
+def _get_kp_model(config_keypoint, device=DEVICE):
+    ckpt = os.path.abspath(config_keypoint["checkpoint_path"])
+    key = (ckpt, str(device))
+    with _KP_LOCK:
+        m = _KP_CACHE.get(key)
+        if m is not None:
+            return m
+        model = RegressorMobileNetV3().to(device)
+        state = torch.load(ckpt, map_location=device)
+        load_checkpoint(state, model)
+        model.eval()
+        for p in model.parameters():
+            p.requires_grad = False
+        _KP_CACHE[key] = model
+        print(f"[DME] Keypoint model loaded once from: {ckpt} (device={device})")
+        return model
+
 def compute_roi(seg, rgb, roi_size=128):
     seg = np.array(seg)
     padding = 5
@@ -37,19 +124,19 @@ def compute_roi(seg, rgb, roi_size=128):
 
     return roi, coords
 
-def estimate_keypoints(image, marker_segmentation, config_keypoint): 
+def estimate_keypoints(image, marker_segmentation, config_keypoint, model=None): 
+
+    if model is None:
+        device = config_keypoint.get("device", DEVICE)
+        model  = load_keypoint_model(config_keypoint["checkpoint_path"], device)
 
     # Load config
-    kp_model_path = config_keypoint['checkpoint_path']
-    checkpoint_path = config_keypoint['checkpoint_path']
     roi_size = config_keypoint.get('roi_size', 128)
 
     # Setup model
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     torch.cuda.empty_cache()
-    kp_model = RegressorMobileNetV3().to(DEVICE)
-    load_checkpoint(torch.load(kp_model_path, map_location=DEVICE), kp_model)
-    kp_model.eval()
+    model.eval()
 
     roi_img, roi_coords = compute_roi(marker_segmentation, image, roi_size=roi_size)
 
@@ -58,7 +145,7 @@ def estimate_keypoints(image, marker_segmentation, config_keypoint):
     roi_tensor = transform(image=roi_img)["image"].unsqueeze(0).float().to(DEVICE)
 
     with torch.no_grad():
-        keypoints_roi = kp_model(roi_tensor).cpu().numpy().reshape(-1, 2)
+        keypoints_roi = model(roi_tensor).cpu().numpy().reshape(-1, 2)
 
     # === Fixed reprojection ===
     s = np.array(roi_img.shape[:2])  # (H, W)

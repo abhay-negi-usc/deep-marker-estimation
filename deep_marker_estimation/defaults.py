@@ -26,7 +26,7 @@ DEFAULTS = {
         "dist_coeffs": np.array([0, 0, 0, 0, 0], dtype=float),
     },
     "segmentation": {
-        "checkpoint_path": _p("segmentation_model", "my_checkpoint_minimodel_epoch_47_batch_0.pth.tar"),
+        "checkpoint_path": _p("segmentation_model", "segmentation_checkpoint_20250329.pth.tar"),
         "input_size": (480, 640),
         "segmentation_threshold": 0.1,
     },

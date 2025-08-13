@@ -280,15 +280,15 @@ def pattern_based_pose_estimation(image, seg, tf_init, marker_config, camera_con
     keypoints_rgb_image_space = find_keypoints(image, seg, maxCorners=100, qualityLevel=0.1, minDistance=10, blockSize=7)    
 
     # visualize keypoints on the image
-    overlay = overlay_points_on_image(image.copy(), keypoints_rgb_image_space, radius=5, color=(0, 255, 0))
-    plt.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
-    plt.title('Keypoints on Image')
-    plt.axis('off')
-    plt.show()
+    # overlay = overlay_points_on_image(image.copy(), keypoints_rgb_image_space, radius=5, color=(0, 255, 0))
+    # plt.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+    # plt.title('Keypoints on Image')
+    # plt.axis('off')
+    # plt.show()
 
     tf_cam_marker, residual = refine_pose_icp_3d2d_auto_match(
         np.array(image), keypoints_marker_cartesian_space, keypoints_rgb_image_space, camera_matrix,
-        tf_init, max_iterations=max_iterations, show_iteration_images=False, max_keypoints_est_2d=max_keypoints_est_2d, output_final_image=True,
+        tf_init, max_iterations=max_iterations, show_iteration_images=False, max_keypoints_est_2d=max_keypoints_est_2d, output_final_image=False,
     )
 
     image_similarity_score = compute_image_similarity_score(image, img_marker, marker_length, tf_cam_marker, camera_matrix, dist_coeffs)

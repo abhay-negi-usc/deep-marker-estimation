@@ -7,7 +7,7 @@ setup(
     install_requires=[
         'numpy',
         'torch',
-        'opencv-python',
+        # 'opencv-python',
         'scikit-image',
         'matplotlib',
         'Pillow',
