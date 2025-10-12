@@ -8,3 +8,5 @@ deep_marker_estimation/__pycache__
 # */__pycache__
 *.tar 
 output 
+data_generation/assets 
+data_generation/multi_marker_output 
