@@ -12,6 +12,95 @@ from deep_marker_estimation.segmentation_model.utils import load_checkpoint
 import numpy as np
 from math import gcd
 
+import os, threading
+import torch
+
+try:
+    DEVICE
+except NameError:
+    DEVICE = "cpu"
+
+_SEG_MODEL_CACHE = {}
+_SEG_LOCK = threading.Lock()
+
+def _looks_like_state_dict(obj):
+    if not isinstance(obj, dict) or not obj:
+        return False
+    # keys are strings, values are tensors/arrays
+    if not all(isinstance(k, str) for k in obj.keys()):
+        return False
+    # tolerate both torch Tensors and numpy arrays
+    import numpy as _np
+    return all(torch.is_tensor(v) or isinstance(v, _np.ndarray) for v in obj.values())
+
+
+def load_segmentation_model(checkpoint_path: str, device: str = DEVICE,
+                            *, in_channels: int = 1, out_channels: int = 1):
+    """
+    Load exactly once per (abs_path, device, in/out chans).
+    Supports:
+      • TorchScript (torch.jit.load)
+      • pickled nn.Module (torch.save(model))
+      • bare state_dict (torch.save(model.state_dict()))
+      • dict with key 'state_dict'
+    """
+    ckpt_abs = os.path.abspath(checkpoint_path)
+    key = (ckpt_abs, str(device), int(in_channels), int(out_channels))
+    with _SEG_LOCK:
+        m = _SEG_CACHE.get(key)
+        if m is not None:
+            return m
+
+        # 1) TorchScript fast path
+        try:
+            m = torch.jit.load(ckpt_abs, map_location=device)
+            m.eval()
+            _SEG_CACHE[key] = m
+            print(f"[DME] Seg TorchScript loaded once from: {ckpt_abs}")
+            return m
+        except Exception:
+            pass
+
+        obj = torch.load(ckpt_abs, map_location=device)
+
+        # 2) pickled nn.Module
+        if hasattr(obj, "forward"):
+            m = obj.to(device).eval()
+            for p in m.parameters(): p.requires_grad = False
+            _SEG_CACHE[key] = m
+            print(f"[DME] Seg nn.Module (pickled) loaded once from: {ckpt_abs}")
+            return m
+
+        # 3) state_dict container or raw state_dict
+        if isinstance(obj, dict):
+            state = obj.get("state_dict", obj) if _looks_like_state_dict(obj) or ("state_dict" in obj) else None
+            if state is not None:
+                # instantiate your known net here
+                # m = UNETWithDropoutMini(in_channels=in_channels, out_channels=out_channels).to(device)
+                m = UNETWithDropout(in_channels=3, out_channels=out_channels).to(device)
+                # IMPORTANT: load directly; do NOT call your load_checkpoint expecting 'state_dict'
+                m.load_state_dict(state, strict=False)
+                m.eval()
+                for p in m.parameters(): p.requires_grad = False
+                _SEG_CACHE[key] = m
+                print(f"[DME] Seg state_dict loaded once into UNETWithDropoutMini from: {ckpt_abs}")
+                return m
+
+        raise RuntimeError(f"Unsupported segmentation checkpoint format at {ckpt_abs}: {type(obj)}")
+
+# seg_utils.py (top-level near imports)
+import os, threading, torch
+
+# Use your existing DEVICE or allow override via config
+try:
+    DEVICE
+except NameError:
+    DEVICE = "cpu"
+
+_SEG_CACHE = {}
+_SEG_LOCK = threading.Lock()
+
+
 def split_image_by_aspect_ratio(image, M, N, stride=None):
     """
     Splits an image into overlapping tiles of size P×Q such that:
@@ -137,7 +226,7 @@ import torch
 import numpy as np
 import cv2
 
-def segment_marker(image, config_segmentation):
+def segment_marker(image, config_segmentation, model=None):
     """
     Segments the marker in the input image by tiling, resizing to model input size,
     performing inference, and stitching the segmentation mask back together.
@@ -152,19 +241,21 @@ def segment_marker(image, config_segmentation):
     Returns:
         np.ndarray: Full-size segmentation mask (H, W)
     """
+    if model is None:
+        device  = config_segmentation.get("device", DEVICE)
+        in_ch   = int(config_segmentation.get("in_channels", 1))
+        out_ch  = int(config_segmentation.get("out_channels", 1))
+        model   = load_segmentation_model(config_segmentation["checkpoint_path"], device,
+                                          in_channels=in_ch, out_channels=out_ch)
 
     # Load config
-    checkpoint_path = config_segmentation['checkpoint_path']
     seg_threshold = config_segmentation.get('segmentation_threshold', 0.5)
     input_size = config_segmentation['input_size']
 
     # Setup model
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     torch.cuda.empty_cache()
-    seg_model = UNETWithDropoutMini(in_channels=1, out_channels=1).to(DEVICE)
-    # seg_model = UNETWithDropout(in_channels=3, out_channels=1).to(DEVICE)
-    load_checkpoint(torch.load(checkpoint_path, map_location=DEVICE), seg_model)
-    seg_model.eval()
+    model.eval()
 
     # Tile original image
     image_tiles, image_tiles_coords = split_image_by_aspect_ratio(
@@ -187,13 +278,13 @@ def segment_marker(image, config_segmentation):
         transformed = seg_transform(image=tile_resized)
         tile_tensor = transformed["image"].unsqueeze(0).to(DEVICE)
 
-        # convert to grayscale 
-        if tile_tensor.shape[1] == 3:
-            tile_tensor = tile_tensor.mean(dim=1, keepdim=True)
+        # # convert to grayscale # FIXME: uncomment for mini model, comment for regular segmentation model 
+        # if tile_tensor.shape[1] == 3:
+        #     tile_tensor = tile_tensor.mean(dim=1, keepdim=True)
 
         # Predict
         with torch.no_grad():
-            seg_output = torch.sigmoid(seg_model(tile_tensor))  # shape: (1, 1, H, W)
+            seg_output = torch.sigmoid(model(tile_tensor))  # shape: (1, 1, H, W)
             seg_mask = seg_output.squeeze().cpu().numpy()  # shape: (H, W)
             torch.cuda.empty_cache()
 
