@@ -4,6 +4,7 @@ from matplotlib import pyplot as plt
 import cv2 
 import os 
 from PIL import Image
+import torch
 
 # utility functions 
 from deep_marker_estimation.utils.image_utils import *
@@ -14,6 +15,7 @@ from deep_marker_estimation.utils.homography_utils import *
 from deep_marker_estimation.utils.pattern_based_estimation_utils import *
 
 # configurations 
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 # configure marker properties 
 img_marker_path = "./deep_marker_estimation/utils/tag36h11_0.png"
 img_marker = cv2.imread(img_marker_path)
@@ -40,14 +42,14 @@ config_camera = {
 }
 # configure segmentation model  
 config_segmentation = {
-    # "checkpoint_path": "./segmentation_model/segmentation_checkpoint_20250329.pth.tar",
-    "checkpoint_path": "./deep_marker_estimation/segmentation_model/my_checkpoint_minimodel_epoch_47_batch_0.pth.tar",
+    "checkpoint_path": "./deep_marker_estimation/segmentation_model/segmentation_checkpoint_20250329.pth.tar",
+    # "checkpoint_path": "./deep_marker_estimation/segmentation_model/my_checkpoint_minimodel_epoch_47_batch_0.pth.tar",
     "input_size": (480, 640), 
     "segmentation_threshold": 0.5,  
 }
 # configure keypoint model
 config_keypoint = {
-    "checkpoint_path": "./deep_marker_estimation/keypoints_model/keypoints_checkpoint_20250330.pth.tar", 
+    "checkpoint_path": "./deep_marker_estimation/keypoints_model/my_checkpoint_keypoints_20250330.pth.tar", 
     "roi_size": 128 # size to which the ROI will be resized, 
 }
 # configure pattern-based pose estimation
@@ -58,7 +60,7 @@ config_pattern_based = {
 
 # marker segmentation 
 # read image
-image_path = "./test_images/marker_ablation_examples/underexposure_dark.png"
+image_path = "./test_images/IMG_5526.png"
 # check if image exists
 if not os.path.exists(image_path):
     raise FileNotFoundError(f"Image not found at {image_path}")

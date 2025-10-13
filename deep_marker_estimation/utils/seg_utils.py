@@ -241,6 +241,7 @@ def segment_marker(image, config_segmentation, model=None):
     Returns:
         np.ndarray: Full-size segmentation mask (H, W)
     """
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     if model is None:
         device  = config_segmentation.get("device", DEVICE)
         in_ch   = int(config_segmentation.get("in_channels", 1))
@@ -253,7 +254,6 @@ def segment_marker(image, config_segmentation, model=None):
     input_size = config_segmentation['input_size']
 
     # Setup model
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     torch.cuda.empty_cache()
     model.eval()
 
