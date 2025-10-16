@@ -126,6 +126,7 @@ def compute_roi(seg, rgb, roi_size=128):
 
 def estimate_keypoints(image, marker_segmentation, config_keypoint, model=None): 
 
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     if model is None:
         device = config_keypoint.get("device", DEVICE)
         model  = load_keypoint_model(config_keypoint["checkpoint_path"], device)
@@ -134,7 +135,6 @@ def estimate_keypoints(image, marker_segmentation, config_keypoint, model=None):
     roi_size = config_keypoint.get('roi_size', 128)
 
     # Setup model
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     torch.cuda.empty_cache()
     model.eval()
 
