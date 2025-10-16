@@ -14,6 +14,8 @@ import argparse
 import json
 import os
 import colorsys
+import gc
+import psutil
 
 import yaml
 from isaacsim import SimulationApp
@@ -40,7 +42,7 @@ timestr = time.strftime("%Y%m%d-%H%M%S")
 print(os.getcwd())
 if os.getcwd() == '/home/anegi/abhay_ws/deep-marker-estimation': # isaac machine 
     OUT_DIR = os.path.join(os.getcwd(), "data_generation", "multi_marker_output", "sdg_markers_" + timestr)
-    dir_textures = "/home/anegi/abhay_ws/deep-marker-estimation/data_generation/assets/tag36h11_no_border_64/"
+    dir_textures = "/home/anegi/abhay_ws/deep-marker-estimation/data_generation/assets/tag36h11_no_border_16/"
     sys.path.append("/home/anegi/.local/share/ov/pkg/isaac-sim-4.5.0/standalone_examples/replicator/object_based_sdg")
     # dir_backgrounds = "/media/anegi/easystore/abhay_ws/marker_detection_failure_recovery/background_images" 
     dir_backgrounds = "/home/anegi/Downloads/test2017" 
@@ -96,7 +98,7 @@ config = {
         # "colorize_semantic_segmentation": True,
     },
     "num_markers": 16,  # Maximum number of markers to use from the pool (num_marker_patterns)
-    "num_markers_scene": 8,  # Exact number of markers to spawn in each scene iteration
+    "num_markers_scene": 16,  # Exact number of markers to spawn in each scene iteration
     "marker_distance_range": (0.1, 2.0),  # Distance range for markers from camera
     "marker_horizontal_range": (-1.0, 1.0),  # Horizontal position range
     "marker_vertical_range": (-1.0, 1.0),  # Vertical position range
@@ -135,59 +137,25 @@ assets_root_path = get_assets_root_path() # out of place here but needs to be af
 
 # Add transformation properties to the prim (if not already present) 
 
-# Profiling context manager
-@contextmanager
-def timer(description: str):
-    start = time.perf_counter()
-    yield
-    elapsed = time.perf_counter() - start
-    print(f"[PROFILE] {description}: {elapsed:.4f}s")
-
-# Global profiling variables
+# Global profiling variables (simplified)
 profile_data = {}
 frame_times = []
 
-def record_timing(operation: str, duration: float):
-    """Record timing data for analysis"""
-    if operation not in profile_data:
-        profile_data[operation] = []
-    profile_data[operation].append(duration)
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    try:
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
+        return memory_info.rss / 1024 / 1024  # Convert to MB
+    except:
+        return 0
 
-def print_profiling_summary():
-    """Print profiling summary at the end"""
-    print("\n" + "="*60)
-    print("PROFILING SUMMARY")
-    print("="*60)
-    for operation, times in profile_data.items():
-        avg_time = sum(times) / len(times)
-        max_time = max(times)
-        min_time = min(times)
-        total_time = sum(times)
-        print(f"{operation:30s}: avg={avg_time:.4f}s, max={max_time:.4f}s, min={min_time:.4f}s, total={total_time:.4f}s, count={len(times)}")
-    
-    if frame_times:
-        avg_frame = sum(frame_times) / len(frame_times)
-        print(f"{'Total Frame Time':30s}: avg={avg_frame:.4f}s")
-    print("="*60)
+def print_memory_status(frame_num):
+    """Print memory usage status"""
+    memory_mb = get_memory_usage()
+    print(f"[SDG] Frame {frame_num}: Memory={memory_mb:.1f}MB")
 
-# Add transformation properties to the prim (if not already present)
-def set_transform_attributes(prim, location=None, orientation=None, rotation=None, scale=None):
-    if location is not None:
-        if not prim.HasAttribute("xformOp:translate"):
-            UsdGeom.Xformable(prim).AddTranslateOp()
-        prim.GetAttribute("xformOp:translate").Set(location)
-    if orientation is not None:
-        if not prim.HasAttribute("xformOp:orient"):
-            UsdGeom.Xformable(prim).AddOrientOp()
-        prim.GetAttribute("xformOp:orient").Set(orientation)
-    if rotation is not None:
-        if not prim.HasAttribute("xformOp:rotateXYZ"):
-            UsdGeom.Xformable(prim).AddRotateXYZOp()
-        prim.GetAttribute("xformOp:rotateXYZ").Set(rotation)
-    if scale is not None:
-        if not prim.HasAttribute("xformOp:scale"):
-            UsdGeom.Xformable(prim).AddScaleOp()
-        prim.GetAttribute("xformOp:scale").Set(scale)
+
 
 # Capture motion blur by combining the number of pathtraced subframes samples simulated for the given duration
 def capture_with_motion_blur_and_pathtracing(duration=0.05, num_samples=8, spp=64, apply_blur=True):
@@ -262,20 +230,69 @@ def write_rgb_data(rgb_data, file_path):
 # Util function to save semantic segmentation annotator data with marker-specific coloring
 def write_sem_data(sem_data, file_path, marker_colors=None):
     id_to_labels = sem_data["info"]["idToLabels"]
+    
+    # Create enhanced JSON data with color information
+    enhanced_labels = {}
+    for seg_id_str, seg_label_data in id_to_labels.items():
+        # Handle different formats of seg_label_data
+        if isinstance(seg_label_data, dict):
+            # If it's a dict, extract the class name
+            seg_label = seg_label_data.get("class", seg_label_data.get("label", "unknown"))
+        else:
+            # If it's a string, use it directly
+            seg_label = seg_label_data
+        
+        # Add color information if available
+        color_info = None
+        if marker_colors is not None and seg_label in marker_colors:
+            color_info = marker_colors[seg_label][:3]  # RGB only for JSON
+        elif seg_label == "background":
+            color_info = [50, 50, 50]
+        else:
+            color_info = [128, 128, 128]
+        
+        enhanced_labels[seg_id_str] = {
+            "label": seg_label,
+            "color": color_info
+        }
+    
     with open(file_path + ".json", "w") as f:
-        json.dump(id_to_labels, f)
+        json.dump(enhanced_labels, f, indent=2)
     
     sem_image_data = np.frombuffer(sem_data["data"], dtype=np.uint8).reshape(*sem_data["data"].shape, -1)
     
     # If marker colors are provided, apply custom coloring
     if marker_colors is not None:
-        colored_sem_data = np.copy(sem_image_data)
-        for label, color in marker_colors.items():
-            # Find pixels matching this label
-            for seg_id, seg_label in id_to_labels.items():
-                if seg_label == label:
-                    mask = np.all(sem_image_data[:, :, :3] == int(seg_id), axis=2)
-                    colored_sem_data[mask] = color[:4]  # RGBA
+        # Create a new image with custom colors
+        colored_sem_data = np.zeros_like(sem_image_data)
+        
+        # Map each segmentation ID to the corresponding custom color
+        for seg_id_str, seg_label_data in id_to_labels.items():
+            seg_id = int(seg_id_str)
+            
+            # Handle different formats of seg_label_data
+            if isinstance(seg_label_data, dict):
+                # If it's a dict, extract the class name
+                seg_label = seg_label_data.get("class", seg_label_data.get("label", "unknown"))
+            else:
+                # If it's a string, use it directly
+                seg_label = seg_label_data
+            
+            # Find all pixels with this segmentation ID
+            # The segmentation data uses the first channel for the ID
+            mask = sem_image_data[:, :, 0] == seg_id
+            
+            if seg_label in marker_colors:
+                # Use custom color for this marker
+                color = marker_colors[seg_label]
+                colored_sem_data[mask] = color[:4]  # RGBA
+            else:
+                # Use a default color for non-marker objects (like background)
+                if seg_label == "background":
+                    colored_sem_data[mask] = [50, 50, 50, 255]  # Dark gray for background
+                else:
+                    colored_sem_data[mask] = [128, 128, 128, 255]  # Gray for other objects
+        
         sem_image_data = colored_sem_data
     
     sem_img = Image.fromarray(sem_image_data, "RGBA")
@@ -290,153 +307,7 @@ def extract_marker_id_from_texture_path(texture_path):
         return int(match.group(1))
     return 0
 
-def create_marker_material_with_texture(texture_path, material_name=None):
-    """
-    Create a material with explicit texture path to avoid USD issues.
-    
-    This approach avoids USD path warnings that occur when using rep.distribution
-    functions with texture sequences. By using direct texture paths instead of
-    distribution sequences, we prevent issues like:
-    - "Cannot append child 'tag36_11_00052' to path"
-    - "Can only append a property 'png' to a prim path"
-    
-    Note: material_name parameter is kept for API compatibility but not used
-    since rep.create.material_omnipbr() doesn't support naming.
-    """
-    return rep.create.material_omnipbr(
-        diffuse_texture=texture_path,  # Direct path, no distribution
-        emissive_texture=texture_path,  # Direct path, no distribution
-        emissive_intensity=40.0
-        # Note: 'name' parameter removed as it's not supported by material_omnipbr
-    )
 
-# Global variable to track current frame texture choices and their assignments
-current_frame_textures = []
-current_frame_texture_ids = []
-current_frame_marker_colors = {}  # Maps tag labels to colors for current frame
-
-# Material cache to avoid recreating the same materials
-material_cache = {}
-
-def create_marker_material_with_texture_cached(texture_path, material_name=None):
-    """
-    Create or retrieve cached material for texture path.
-    This reduces material creation overhead by reusing materials.
-    """
-    if texture_path not in material_cache:
-        material_cache[texture_path] = rep.create.material_omnipbr(
-            diffuse_texture=texture_path,  # Direct path, no distribution
-            emissive_texture=texture_path,  # Direct path, no distribution
-            emissive_intensity=40.0
-        )
-    return material_cache[texture_path]
-
-def randomize_active_markers():
-    """Randomly select exactly num_markers_scene textures from the texture pool"""
-    global current_frame_textures, current_frame_texture_ids, current_frame_marker_colors
-    
-    # Sample exactly num_markers_scene textures from the available textures
-    num_markers_scene = config.get("num_markers_scene", 8)
-    selected_textures = random.sample(tag_textures, min(num_markers_scene, len(tag_textures)))
-    
-    # Clear previous frame data
-    current_frame_textures.clear()
-    current_frame_texture_ids.clear()
-    current_frame_marker_colors.clear()
-    
-    # Assign textures to markers and build color mapping
-    for marker_idx, texture_path in enumerate(selected_textures):
-        current_frame_textures.append(texture_path)
-        texture_id = extract_marker_id_from_texture_path(texture_path)
-        current_frame_texture_ids.append(texture_id)
-        
-        # Map marker label to the color associated with this texture ID
-        label = f"tag{marker_idx}"
-        current_frame_marker_colors[label] = marker_colors_by_texture_id[texture_id]
-    
-    return list(range(len(selected_textures)))  # Return active marker indices
-
-def set_all_markers_visibility_and_pose():
-    """Set visibility and pose for all markers in batch to improve performance"""
-    # Calculate all poses first
-    pose_calculations = []
-    for marker_idx in range(len(markers)):  # Process ALL markers at once
-        if marker_idx < len(current_frame_textures):
-            # Active marker - calculate pose relative to camera
-            distance = random.uniform(config["marker_distance_range"][0], config["marker_distance_range"][1])
-            h_location = random.uniform(config["marker_horizontal_range"][0], config["marker_horizontal_range"][1])
-            v_location = random.uniform(config["marker_vertical_range"][0], config["marker_vertical_range"][1])
-            rotation_x = random.uniform(-80, 80)
-            rotation_y = random.uniform(-80, 80) 
-            rotation_z = random.uniform(-180, 180)
-            
-            pose_calculations.append({
-                'marker_idx': marker_idx,
-                'active': True,
-                'distance': distance,
-                'h_location': h_location,
-                'v_location': v_location,
-                'rotation': (rotation_x, rotation_y, rotation_z)
-            })
-        else:
-            # Inactive marker - hide it
-            pose_calculations.append({
-                'marker_idx': marker_idx,
-                'active': False,
-                'position': (1000, 1000, 1000)
-            })
-    
-    # Apply all poses in one batch
-    for pose_calc in pose_calculations:
-        marker_idx = pose_calc['marker_idx']
-        if pose_calc['active']:
-            # Single context for active marker
-            with markers[marker_idx]:
-                rep.modify.pose_camera_relative(
-                    camera=cam,
-                    render_product=rp_cam,
-                    distance=pose_calc['distance'],
-                    horizontal_location=pose_calc['h_location'],
-                    vertical_location=pose_calc['v_location'],
-                )
-                rep.modify.pose(rotation=pose_calc['rotation'])
-        else:
-            # Single context for inactive marker
-            with markers[marker_idx]:
-                rep.modify.pose(position=pose_calc['position'])
-
-def set_marker_visibility(marker_idx, visible=True):
-    """Simplified function for individual marker visibility (kept for compatibility)"""
-    if marker_idx >= len(markers):
-        return
-        
-    if visible:
-        # Pre-calculate random values to avoid rep.distribution overhead in loop
-        distance = random.uniform(config["marker_distance_range"][0], config["marker_distance_range"][1])
-        h_location = random.uniform(config["marker_horizontal_range"][0], config["marker_horizontal_range"][1])
-        v_location = random.uniform(config["marker_vertical_range"][0], config["marker_vertical_range"][1])
-        rotation_x = random.uniform(-80, 80)
-        rotation_y = random.uniform(-80, 80) 
-        rotation_z = random.uniform(-180, 180)
-        
-        # Make marker visible by setting position in scene
-        with markers[marker_idx]:
-            rep.modify.pose_camera_relative(
-                camera=cam,
-                render_product=rp_cam,
-                distance=distance,
-                horizontal_location=h_location,
-                vertical_location=v_location,
-            )
-            rep.modify.pose(
-                rotation=(rotation_x, rotation_y, rotation_z),
-            )
-    else:
-        # Hide marker by moving it far away
-        with markers[marker_idx]:
-            rep.modify.pose(
-                position=(1000, 1000, 1000),  # Move far away from camera
-            )
 
 def write_pose_data(pose_data, file_path):
     with open(file_path + ".json", "w") as f:
@@ -450,56 +321,19 @@ def serialize_vec3f(vec3f):
     # Convert Gf.Vec3f to a list or dictionary
     return [vec3f[0], vec3f[1], vec3f[2]]
 
-# Update the app until a given simulation duration has passed (simulate the world between captures)
+# Update the app until a given simulation duration has passed (simplified)
 def run_simulation_loop(duration):
     timeline = omni.timeline.get_timeline_interface()
     elapsed_time = 0.0
     previous_time = timeline.get_current_time()
     if not timeline.is_playing():
         timeline.play()
-    app_updates_counter = 0
     while elapsed_time <= duration:
         simulation_app.update()
         elapsed_time += timeline.get_current_time() - previous_time
         previous_time = timeline.get_current_time()
-        app_updates_counter += 1
-        # print(
-        #     f"\t Simulation loop at {timeline.get_current_time():.2f}, current elapsed time: {elapsed_time:.2f}, counter: {app_updates_counter}"
-        # )
-    print(
-        f"[SDG] Simulation loop finished in {elapsed_time:.2f} seconds at {timeline.get_current_time():.2f} with {app_updates_counter} app updates."
-    )
 
-def quatf_to_eul(quatf): 
-    qw = quatf.real 
-    qx, qy, qz = np.array(quatf.imaginary) 
-    a,b,c = R.from_quat([qx,qy,qz,qw]).as_euler('xyz',degrees=True) 
-    return a,b,c 
 
-def get_random_pose_on_hemisphere(origin, radius, camera_forward_axis=(0, 0, -1)):
-    origin = Gf.Vec3f(origin)
-    camera_forward_axis = Gf.Vec3f(camera_forward_axis)
-
-    # Generate random angles for spherical coordinates
-    theta = np.random.uniform(0, 2 * np.pi)
-    phi = np.arcsin(np.random.uniform(-1, 1))
-
-    # Spherical to Cartesian conversion
-    x = radius * np.cos(theta) * np.cos(phi)
-    y = radius * np.sin(phi)
-    z = abs(radius * np.sin(theta) * np.cos(phi))
-
-    location = origin + Gf.Vec3f(x, y, z)
-
-    # Calculate direction vector from camera to look_at point
-    direction = origin - location
-    direction_normalized = direction.GetNormalized()
-
-    # Calculate rotation from forward direction (rotateFrom) to direction vector (rotateTo)
-    rotation = Gf.Rotation(Gf.Vec3d(camera_forward_axis), Gf.Vec3d(direction_normalized))
-    orientation = Gf.Quatf(rotation.GetQuat())
-
-    return location, orientation
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
@@ -639,15 +473,16 @@ for marker_idx in range(num_markers):
     # Apply initial texture to marker (will be replaced each iteration)
     with marker:       
         initial_texture = random.choice(tag_textures)
-        mat = create_marker_material_with_texture(
-            texture_path=initial_texture,
-            material_name=f"initial_marker_material_{marker_idx}"
+        mat = rep.create.material_omnipbr(
+            diffuse_texture=initial_texture,
+            emissive_texture=initial_texture,
+            emissive_intensity=40.0
         )
         rep.modify.material(mat) 
     
     floating_labeled_prims.append(marker_prim)
 
-print(f"Created {num_markers} marker pool. Will sample exactly {num_markers_scene} textures from {num_marker_patterns} available patterns each iteration. Each texture ID has a consistent segmentation color.")
+print(f"Created {num_markers} marker pool using event-based randomization. Will sample exactly {num_markers_scene} textures from {num_marker_patterns} available patterns each iteration. Each texture ID has a consistent segmentation color.")
 #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
 # SHADOWERS  
@@ -711,6 +546,8 @@ print("Environment update step done.")
 
 # RANDOMIZER EVENTS 
 plane_textures = [os.path.join(dir_backgrounds, f) for f in os.listdir(dir_backgrounds) if os.path.isfile(os.path.join(dir_backgrounds, f))] 
+
+# Background plane randomization
 with rep.trigger.on_custom_event(event_name="randomize_plane_texture"): 
     with background_plane:       
         mat = rep.create.material_omnipbr(
@@ -721,47 +558,20 @@ with rep.trigger.on_custom_event(event_name="randomize_plane_texture"):
             emissive_intensity=0.0, 
         )    
         rep.modify.material(mat) 
-rep.utils.send_og_event(event_name="randomize_plane_texture") 
 
-with rep.trigger.on_custom_event(event_name="randomize_marker_pose_cam_space"):
-    # Note: randomize_active_markers() will be called during simulation loop
-    # Here we just set up the trigger to handle marker visibility and pose
-    pass
-rep.utils.send_og_event(event_name="randomize_marker_pose_cam_space") 
-
+# Lighting randomization
 with rep.trigger.on_custom_event(event_name="randomize_lighting"):
-    
-    # location, orientation = get_random_pose_on_hemisphere(origin=(0,0,0), radius=1.0, camera_forward_axis=(0,0,-1))
-    # a,b,c = quatf_to_eul(orientation) 
-
     with distant_light:
         rep.modify.pose(
-            rotation=rep.distribution.uniform((-30,-30,0), (30,30,0)), # NOTE: believe that this is not perfect but workable, reduced angular range 
-            # rotation=(a,b,c),  
+            rotation=rep.distribution.uniform((-30,-30,0), (30,30,0))
         )
         rep.modify.attribute("exposure", rep.distribution.uniform(10, 16)) 
-        # rep.modify.attribute("color", rep.distribution.uniform((0, 0, 0), (1, 1, 1)))  
-        # rep.modify.attribute("color_temperature", rep.distribution.uniform(2500, 10000))  
 
+# Initial setup - only for background and lighting
+rep.utils.send_og_event(event_name="randomize_plane_texture") 
 rep.utils.send_og_event(event_name="randomize_lighting") 
 
-with rep.trigger.on_custom_event(event_name="randomize_tag_texture"): 
-    # Note: texture assignment will be handled in simulation loop
-    # This trigger just ensures the event is registered
-    pass 
-rep.utils.send_og_event(event_name="randomize_tag_texture") 
-
-# with rep.trigger.on_custom_event(event_name="randomize_shadower_pose"):   
-#     with shadower_plane:
-#         rep.modify.pose(
-#             # position=rep.distribution.uniform((10,10,1),(10,10,2.5)),
-#             position=rep.distribution.uniform((-10.0,-10.0,2.5),(10.0,10.0,2.5)), 
-#             rotation=rep.distribution.uniform((-0,-0,-180), (0,0,180)), 
-#             scale=rep.distribution.uniform((5.0,5.0,5.0), (10.0,10.0,10.0)), 
-#         )
-# rep.utils.send_og_event(event_name="randomize_shadower_pose")
-
-print("Randomizer events set up.")
+print("Randomizer events set up using simplified approach to avoid hanging (markers handled in simulation loop).")
 
 # set up writer 
 writer = rep.WriterRegistry.get("BasicWriter")
@@ -796,42 +606,111 @@ wall_time_start = time.perf_counter()
 
 rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
 rgb_annot.attach(rp_cam)
-sem_annot = rep.AnnotatorRegistry.get_annotator("semantic_segmentation", init_params={"colorize": True})
+sem_annot = rep.AnnotatorRegistry.get_annotator("semantic_segmentation", init_params={"colorize": False})
 sem_annot.attach(rp_cam)
 print("SDG setup done.")
 #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
 # SIMULATION LOOP 
+# Check if we need to randomize marker selection or just use all markers
+num_markers_scene = config.get("num_markers_scene", 8)
+num_markers = config.get("num_markers", 16)
+no_marker_selection_randomization = (num_markers_scene >= num_markers)
+
+if no_marker_selection_randomization:
+    print(f"[SDG] All {num_markers} markers will remain active - using hybrid approach")
+else:
+    print(f"[SDG] Will hide {num_markers - num_markers_scene} markers each frame using hybrid approach")
+
 for i in range(num_frames):
-    print(f"[SDG] Processing frame {i}/{num_frames}")
     
-    if i % 5 == 0: # NOTE: reduce randomization frequency to speed up compute 
-        rep.utils.send_og_event(event_name="randomize_lighting") 
+    # Memory monitoring every 50 frames
+    if i % 50 == 0:
+        print_memory_status(i)
+    else:
+        print(f"[SDG] Processing frame {i}/{num_frames}")
+    
+    # Determine active markers for this frame
+    if not no_marker_selection_randomization:
+        # Randomly select which markers to show
+        active_marker_indices = random.sample(range(num_markers), num_markers_scene)
+    else:
+        # All markers are active
+        active_marker_indices = list(range(num_markers))
+    
+    # Store texture paths used for each marker this frame
+    frame_marker_textures = {}
+    
+    # Lighting randomization (less frequent for performance) - use events
+    if i % 5 == 0:
+        rep.utils.send_og_event(event_name="randomize_lighting")
 
-    if i % 1 == 0: 
-        rep.utils.send_og_event(event_name="randomize_plane_texture") 
+    # Main randomization every frame - hybrid approach
+    if i % 1 == 0:
+        # Background texture randomization - use events
+        rep.utils.send_og_event(event_name="randomize_plane_texture")
         
-        # Directly call randomization functions instead of events
-        active_markers = randomize_active_markers()
-        
-        # Set visibility and pose for all markers using optimized batch operation
-        set_all_markers_visibility_and_pose()
-
-        # print(f"Randomize shadower pose")
-        # rep.utils.send_og_event(event_name="randomize_shadower_pose") 
-
-    if i % 1 == 0: # NOTE: reduce randomization frequency to speed up compute 
-        # Apply textures to active markers based on current frame selection in batch
-        for marker_idx, texture_path in enumerate(current_frame_textures):
-            if marker_idx < len(markers):
-                # Use cached material to avoid recreation overhead
-                mat = create_marker_material_with_texture_cached(texture_path)
+        # Marker randomization - direct approach to avoid hanging
+        for marker_idx in range(num_markers):
+            if marker_idx in active_marker_indices:
+                # Active marker - assign texture based on marker index to ensure correspondence
+                # tag0 gets tag36_11_00000.png, tag1 gets tag36_11_00001.png, etc.
+                if marker_idx < len(tag_textures):
+                    # Use texture that corresponds to the marker index
+                    texture_filename = f"tag36_11_{marker_idx:05d}.png"
+                    texture_path = None
+                    # Find the matching texture file
+                    for tex_path in tag_textures:
+                        if texture_filename in tex_path:
+                            texture_path = tex_path
+                            break
+                    
+                    # Fallback to random if specific texture not found
+                    if texture_path is None:
+                        texture_path = random.choice(tag_textures)
+                else:
+                    # If we have more markers than textures, cycle through them
+                    texture_idx = marker_idx % len(tag_textures)
+                    texture_filename = f"tag36_11_{texture_idx:05d}.png"
+                    texture_path = None
+                    for tex_path in tag_textures:
+                        if texture_filename in tex_path:
+                            texture_path = tex_path
+                            break
+                    if texture_path is None:
+                        texture_path = tag_textures[texture_idx]
                 
-                with markers[marker_idx]: 
+                frame_marker_textures[marker_idx] = texture_path  # Store the actual texture used
+                with markers[marker_idx]:
+                    # Set material
+                    mat = rep.create.material_omnipbr(
+                        diffuse_texture=texture_path,
+                        emissive_texture=texture_path,
+                        emissive_intensity=40.0
+                    )
                     rep.modify.material(mat)
+                    # Set pose using individual rep calls for reliability
+                    rep.modify.pose_camera_relative(
+                        camera=cam,
+                        render_product=rp_cam,
+                        distance=random.uniform(config["marker_distance_range"][0], config["marker_distance_range"][1]),
+                        horizontal_location=random.uniform(config["marker_horizontal_range"][0], config["marker_horizontal_range"][1]),
+                        vertical_location=random.uniform(config["marker_vertical_range"][0], config["marker_vertical_range"][1]),
+                    )
+                    rep.modify.pose(
+                        rotation=(
+                            random.uniform(-80, 80),
+                            random.uniform(-80, 80), 
+                            random.uniform(-180, 180)
+                        )
+                    )
+            else:
+                # Inactive marker - move far away
+                with markers[marker_idx]:
+                    rep.modify.pose(position=(1000, 1000, 1000))
 
-    # update the app to apply the randomization 
-    rep.orchestrator.step(delta_time=0.0, rt_subframes=3, pause_timeline=False) # NOTE: reducing rt_subframes from 5 for speed 
+    # Update the app to apply randomization 
+    rep.orchestrator.step(delta_time=0.0, rt_subframes=3, pause_timeline=False) 
 
     # Enable render products only at capture time
     if disable_render_products_between_captures:
@@ -839,28 +718,33 @@ for i in range(num_frames):
 
     # Capture the current frame
     if i % 1 == 0:
-        # capture_with_motion_blur_and_pathtracing(duration=0.025, num_samples=8, spp=128)
         capture_with_motion_blur_and_pathtracing(duration=0.05, num_samples=8, spp=128, apply_blur=False) 
-        # rep.orchestrator.step(delta_time=0.0, rt_subframes=1, pause_timeline=False)
     else:
         rep.orchestrator.step(delta_time=0.0, rt_subframes=rt_subframes, pause_timeline=False)
 
+    # Collect transform data
     cam_tf = get_world_transform_xform_as_np_tf(cam_prim)
     plane_tf = get_world_transform_xform_as_np_tf(background_plane_prim)
     light_tf = get_world_transform_xform_as_np_tf(distant_light_prim) 
     
-    # Collect transforms for active markers (those with textures assigned)
+    # Collect data for active markers
     markers_data = {}
     marker_ids = []
+    current_frame_marker_colors = {}
     
-    for marker_idx in range(len(current_frame_textures)):
+    for marker_idx in active_marker_indices:
         if marker_idx < len(markers):
             marker_prim = marker_prims[marker_idx]
             marker_tf = get_world_transform_xform_as_np_tf(marker_prim)
             
-            # Get texture info from current frame data
-            current_texture_path = current_frame_textures[marker_idx]
-            marker_id = current_frame_texture_ids[marker_idx]
+            # Use the actual texture that was applied to this marker
+            if marker_idx in frame_marker_textures:
+                current_texture_path = frame_marker_textures[marker_idx]
+            else:
+                # Fallback if something went wrong
+                current_texture_path = random.choice(tag_textures)
+            
+            marker_id = extract_marker_id_from_texture_path(current_texture_path)
             marker_ids.append(marker_id)
             
             markers_data[f"tag{marker_idx}"] = {
@@ -870,13 +754,18 @@ for i in range(num_frames):
                 "texture_path": current_texture_path,
                 "is_active": True
             }
+            
+            # Map marker label to color for segmentation
+            label = f"tag{marker_idx}"
+            current_frame_marker_colors[label] = marker_colors_by_texture_id[marker_id]
     
-    # Track inactive markers for completeness
-    for marker_idx in range(len(current_frame_textures), len(markers)):
-        markers_data[f"tag{marker_idx}"] = {
-            "marker_index": marker_idx,
-            "is_active": False
-        }
+    # Track inactive markers
+    for marker_idx in range(num_markers):
+        if marker_idx not in active_marker_indices:
+            markers_data[f"tag{marker_idx}"] = {
+                "marker_index": marker_idx,
+                "is_active": False
+            }
 
     pose_data = {
         "cam": cam_tf.tolist(), 
@@ -885,6 +774,7 @@ for i in range(num_frames):
         "light": light_tf.tolist(), 
     } 
 
+    # Save data
     write_rgb_data(rgb_annot.get_data(), f"{OUT_DIR}/rgb/rgb_{i}")
     write_sem_data(sem_annot.get_data(), f"{OUT_DIR}/seg/seg_{i}", current_frame_marker_colors)
     write_pose_data(pose_data, f"{OUT_DIR}/pose/pose_{i}") 
@@ -896,11 +786,8 @@ for i in range(num_frames):
         },
         "markers": markers_data,
         "marker_ids": marker_ids,
-        "active_marker_texture_ids": current_frame_texture_ids,
-        "active_marker_colors": {f"texture_id_{tid}": color for tid, color in zip(current_frame_texture_ids, [marker_colors_by_texture_id[tid] for tid in current_frame_texture_ids])},
-        "num_active_markers": len(current_frame_textures),
+        "num_active_markers": len(active_marker_indices),
         "total_markers": len(markers),
-        "num_marker_patterns": num_marker_patterns
     } 
 
     write_metadata(metadata, f"{OUT_DIR}/metadata/metadata_{i}")
@@ -909,19 +796,21 @@ for i in range(num_frames):
     if disable_render_products_between_captures:
         object_based_sdg_utils.set_render_products_updates(render_products, False, include_viewport=False)
 
-    # Run the simulation for a given duration between frame captures
-    if sim_duration_between_captures > 0:
-        run_simulation_loop(duration=sim_duration_between_captures)
-    else:
-        simulation_app.update()    # Disable render products between captures
-    if disable_render_products_between_captures:
-        object_based_sdg_utils.set_render_products_updates(render_products, False, include_viewport=False)
-
-    # Run the simulation for a given duration between frame captures
+    # Run simulation between captures
     if sim_duration_between_captures > 0:
         run_simulation_loop(duration=sim_duration_between_captures)
     else:
         simulation_app.update()
+    
+    # Memory management - clear caches periodically
+    if i % 100 == 0 and i > 0:
+        print(f"[SDG] Memory cleanup at frame {i}")
+        gc.collect()
+        
+    if i % 1000 == 0 and i > 0:
+        print(f"[SDG] Deep memory cleanup at frame {i}")
+        simulation_app.update()
+        rep.orchestrator.step(delta_time=0.0, rt_subframes=1, pause_timeline=False)
 #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
 # CLEANUP 
