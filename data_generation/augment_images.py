@@ -159,23 +159,24 @@ def gradient(width, height):
     t_size = max(width, height)
     size = t_size * 2
 
-    grad = np.zeros((size, size))
+    # Vectorized vertical gradient [0..1]
+    col = np.linspace(0.0, 1.0, num=size, dtype=np.float32)[:, None]
+    grad = np.broadcast_to(col, (size, size)).copy()
 
-    for i in range(size):
-        grad[i] = (i / size)
-
-    center = grad.shape[0]//2
+    center = grad.shape[0] // 2
     mat = cv2.getRotationMatrix2D((center, center), random_function() * 360, 1.0)
     pic = cv2.warpAffine(grad, mat, (size, size))
 
     # Final crop
+    center = grad.shape[0] // 2
+    pic = pic[center - height // 2:center + height // 2, center - width // 2:center + width // 2]
 
-    center = grad.shape[0]//2
-    pic = pic[center - height//2:center + height//2, center - width//2:center + width//2]
-
-    # Re-range
-
-    pic = (pic - np.min(pic)) / (np.max(pic) - np.min(pic) + 1e-6)
+    # Re-range (guard against flat image)
+    pmin = float(pic.min())
+    pmax = float(pic.max())
+    if pmax - pmin < 1e-12:
+        return np.zeros_like(pic, dtype=np.float32)
+    pic = (pic - pmin) / (pmax - pmin)
 
     return pic
 
@@ -221,20 +222,25 @@ def lines(width, height, num_patterns = 3):
 
 def circular(width, height):
 
-    pic = np.zeros((height, width))
-    center = (randint(0, height),
-              randint(0, width))
+    # Vectorized radial falloff around a random center
+    cy = randint(0, height - 1)
+    cx = randint(0, width - 1)
 
-    diag = int((width**2 + height**2)**(1/2))
-    
-    radius = randint(diag//4, diag)
-    
-    for i in range(height):
-        for j in range(width):
-            pic[i, j] = max(1 - (((i - center[0])**2 + (j - center[1])**2)**(1/2) / radius), 0)
+    diag = int((width**2 + height**2) ** 0.5)
+    radius = max(1, randint(max(1, diag // 4), diag))
 
-    pic = (pic - np.min(pic)) / (np.max(pic) - np.min(pic) + 1e-6)
-        
+    yy, xx = np.ogrid[:height, :width]
+    dist = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2).astype(np.float32)
+    pic = 1.0 - (dist / float(radius))
+    np.clip(pic, 0.0, 1.0, out=pic)
+
+    # Normalize for safety (usually already in [0,1])
+    pmin = float(pic.min())
+    pmax = float(pic.max())
+    if pmax - pmin > 1e-12:
+        pic = (pic - pmin) / (pmax - pmin)
+    else:
+        pic = np.zeros_like(pic, dtype=np.float32)
     return pic
 
 def perlin(width, height, bins = 0, octaves = 4):
@@ -264,7 +270,9 @@ def perlin(width, height, bins = 0, octaves = 4):
 def lighting_augmentation(image): 
     # check if image is 0-1 or 0-255, convert to 0-1 
     # final image outputted is 0-255 
-    image = np.array(image, dtype=float)
+    image = np.array(image, dtype=np.float32)
+    if image.size == 0:
+        return image
     if image.max() > 1.0:
         # image is 0-255  
         image = image / 255.0 
@@ -275,28 +283,31 @@ def lighting_augmentation(image):
         image = image[:, :, None]
 
     height, width = image.shape[:2] 
-    image_dim3 = image.shape[2] 
     augmented_image = image.copy()
-    if np.random.rand() < 0.8: 
-        lines_effect = lines(width, height) 
-        augmented_image *= np.repeat(lines_effect[:, :, None], image_dim3, -1)
-    if np.random.rand() < 0.1: 
-        perlin_effect = perlin(width, height) 
-        augmented_image *= np.repeat(perlin_effect[:, :, None], image_dim3, -1)
-    if np.random.rand() < 0.8: 
-        gradient_effect = gradient(width, height) 
-        augmented_image *= np.repeat(gradient_effect[:, :, None], image_dim3, -1)  
-    if np.random.rand() < 0.2: 
-        circular_effect = circular(width, height) 
-        augmented_image *= np.repeat(circular_effect[:, :, None], image_dim3, -1) 
-    
-    # augmented_image = np.repeat(lines_effect[:,:,np.newaxis],image_dim3,-1) * np.repeat(perlin_effect[:,:,np.newaxis],image_dim3,-1) * np.repeat(gradient_effect[:,:,np.newaxis],image_dim3,-1) * np.repeat(circular_effect[:,:,np.newaxis],image_dim3,-1) * image 
-    if (augmented_image.max() < 0.4) or augmented_image.max() > 1.0: # NOTE: HYPERPARAMETER 
-        # renormalize image if too dark 
-        pixel_max = np.random.uniform(0.9,1.0)  
-        augmented_image = pixel_max * (augmented_image - np.min(augmented_image)) / (np.max(augmented_image) - np.min(augmented_image) + 1e-6) 
-    
-    augmented_image *= 255 
+
+    # Apply effects with broadcasting to avoid large temporary repeats
+    if np.random.rand() < 0.8:
+        eff = lines(width, height).astype(np.float32)
+        augmented_image *= eff[..., None]
+    if np.random.rand() < 0.1:
+        eff = perlin(width, height).astype(np.float32)
+        augmented_image *= eff[..., None]
+    if np.random.rand() < 0.8:
+        eff = gradient(width, height).astype(np.float32)
+        augmented_image *= eff[..., None]
+    if np.random.rand() < 0.2:
+        eff = circular(width, height).astype(np.float32)
+        augmented_image *= eff[..., None]
+
+    # Renormalize if too dark or out of range
+    amax = float(augmented_image.max())
+    amin = float(augmented_image.min())
+    if (amax < 0.4) or (amax > 1.0):  # NOTE: HYPERPARAMETER
+        pixel_max = np.random.uniform(0.9, 1.0)
+        denom = max(1e-6, (amax - amin))
+        augmented_image = pixel_max * (augmented_image - amin) / denom
+
+    augmented_image *= 255.0
 
     # If original was grayscale, squeeze channel back out
     if was_grayscale:
@@ -316,9 +327,14 @@ class datapoint:
             self.dataset_root = os.path.dirname(os.path.dirname(self.metadata_filepath))
         except Exception:
             self.dataset_root = None
+        # Caches and lazy attrs
+        self._img_size = None  # (W, H) cached on first use
+        self._color_map_rgb = {}
 
+        # Load metadata and pose data now
         self.read_files()
         self.read_pose_data()
+    
 
     def read_files(self):
         # Read the actual data from files and store it
@@ -385,6 +401,17 @@ class datapoint:
                     continue
         self.num_active_markers = len(self.active_markers)
         self.total_markers = total
+        # Cache color map (BGR -> RGB) for segmentation matching
+        self._color_map_rgb = {}
+        try:
+            for tag in self.active_markers:
+                info = (self.marker_info or {}).get(tag)
+                if info and info.get('seg_color_bgr') is not None:
+                    bgr = info['seg_color_bgr']
+                    if isinstance(bgr, (list, tuple)) and len(bgr) >= 3:
+                        self._color_map_rgb[tag] = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+        except Exception:
+            self._color_map_rgb = {}
 
     def compute_keypoints(self, keypoints_tag_frame, camera_matrix=None):
         # Project keypoints defined in marker frame using T_cam_marker directly.
@@ -443,9 +470,11 @@ class datapoint:
         """Return a binary segmentation mask from quad polygons in metadata.
         This is for internal use (ROI/filtering). Saved segmentation files remain unchanged.
         """
-        # Determine image size from RGB
-        rgb_img = Image.open(self.rgb_filepath)
-        W, H = rgb_img.size
+        # Determine image size from cached metadata or read once
+        if not self._img_size:
+            with Image.open(self.rgb_filepath) as _im_sz:
+                self._img_size = _im_sz.size  # (W, H)
+        W, H = self._img_size
         mask = np.zeros((H, W), dtype=np.uint8)
 
         # Decide which quads to render
@@ -459,43 +488,61 @@ class datapoint:
         return Image.fromarray(mask)
     
     def get_roi_image(self, seg=None, roi_size=128, padding=5, tag_name: str | None = None):
+        # Fallback to metadata-derived mask when seg not provided
         if seg is None:
             seg = self.preprocess_seg_img(tag_name=tag_name)
 
-        image_border_size = np.max([np.array(seg).shape[0], np.array(seg).shape[1]])
+        # Border padding large enough to safely crop around bbox
+        seg_arr = np.array(seg, dtype=np.uint8)
+        image_border_size = int(np.max([seg_arr.shape[0], seg_arr.shape[1]]))
 
-        # get pixel info of seg
-        seg = np.array(seg)
-        seg = cv2.copyMakeBorder(seg, image_border_size, image_border_size, image_border_size, image_border_size, cv2.BORDER_CONSTANT, value=0)
-        tag_pixels = np.argwhere(seg == 255)
-        seg_tag_min_x = np.min(tag_pixels[:, 1])
-        seg_tag_max_x = np.max(tag_pixels[:, 1])
-        seg_tag_min_y = np.min(tag_pixels[:, 0])
-        seg_tag_max_y = np.max(tag_pixels[:, 0])
-        seg_height = seg_tag_max_y - seg_tag_min_y
-        seg_width = seg_tag_max_x - seg_tag_min_x
-        seg_center_x = (seg_tag_min_x + seg_tag_max_x) // 2
-        seg_center_y = (seg_tag_min_y + seg_tag_max_y) // 2
+        # Fast bbox on mask
+        seg_np = cv2.copyMakeBorder(
+            seg_arr,
+            image_border_size,
+            image_border_size,
+            image_border_size,
+            image_border_size,
+            cv2.BORDER_CONSTANT,
+            value=0,
+        )
+        x, y, w, h = cv2.boundingRect(seg_np)
+        seg_tag_min_x = int(x)
+        seg_tag_max_x = int(x + w)
+        seg_tag_min_y = int(y)
+        seg_tag_max_y = int(y + h)
+        seg_height = int(h)
+        seg_width = int(w)
+        seg_center_x = int(x + w // 2)
+        seg_center_y = int(y + h // 2)
 
-        # get pixel info of rgb
-        rgb = np.array(Image.open(self.rgb_filepath))
-        rgb = cv2.copyMakeBorder(rgb, image_border_size, image_border_size, image_border_size, image_border_size, cv2.BORDER_CONSTANT, value=0)
-        rgb_side = max(seg_height, seg_width) + 2 * padding
-        rgb_tag_min_x = seg_center_x - rgb_side // 2
-        rgb_tag_max_x = seg_center_x + rgb_side // 2
-        rgb_tag_min_y = seg_center_y - rgb_side // 2
-        rgb_tag_max_y = seg_center_y + rgb_side // 2
+        # Load RGB and prepare same border
+        with Image.open(self.rgb_filepath) as _im_rgb:
+            rgb = np.array(_im_rgb)
+        rgb = cv2.copyMakeBorder(
+            rgb,
+            image_border_size,
+            image_border_size,
+            image_border_size,
+            image_border_size,
+            cv2.BORDER_CONSTANT,
+            value=0,
+        )
+        rgb_side = int(max(seg_height, seg_width) + 2 * padding)
+        rgb_tag_min_x = int(seg_center_x - rgb_side // 2)
+        rgb_tag_max_x = int(seg_center_x + rgb_side // 2)
+        rgb_tag_min_y = int(seg_center_y - rgb_side // 2)
+        rgb_tag_max_y = int(seg_center_y + rgb_side // 2)
         roi_img = rgb[rgb_tag_min_y:rgb_tag_max_y, rgb_tag_min_x:rgb_tag_max_x, :]
 
-        # resize rgb bbox to roi size
+        # Resize ROI to fixed size
         try:
             self.roi_img = cv2.resize(roi_img, (roi_size, roi_size))
         except Exception:
-            print("error resizing")
-            import pdb; pdb.set_trace()
+            self.roi_img = roi_img
 
-        W = rgb.shape[1]
-        H = rgb.shape[0]
+        W = int(rgb.shape[1])
+        H = int(rgb.shape[0])
         # image (x,y) coordinates (origin at image center)
         self.roi_coordinates = np.array([
             rgb_tag_min_x - W / 2,
@@ -556,15 +603,102 @@ class datapoint:
     #     return "\n".join(description) 
 
 class DataProcessor:
-    def __init__(self, data_folders, out_dir):
+    def __init__(self, data_folders, out_dir, fast_mode: bool | None = None, max_datapoints_total: int | None = None, resume: bool | None = None):
         self.data_folders = data_folders
         self.out_dir = out_dir
         self.datapoints = []
         self.datapoints_train = []
         self.datapoints_val = []
+        # Fast mode toggle: arg overrides env; default False
+        if fast_mode is None:
+            env_fast = os.environ.get("DME_FAST") or os.environ.get("DME_FAST_MODE")
+            self.fast_mode = str(env_fast).lower() in {"1", "true", "yes"}
+        else:
+            self.fast_mode = bool(fast_mode)
+        # Max total datapoints (train + val): arg overrides env; default None (unlimited)
+        if max_datapoints_total is None:
+            env_max = os.environ.get("DME_MAX_DATAPOINTS") or os.environ.get("DME_MAX_SAMPLES")
+            try:
+                self.max_datapoints_total = int(env_max) if env_max not in (None, "", "None") else None
+                if self.max_datapoints_total is not None and self.max_datapoints_total <= 0:
+                    self.max_datapoints_total = None
+            except Exception:
+                self.max_datapoints_total = None
+        else:
+            self.max_datapoints_total = int(max_datapoints_total)
+            if self.max_datapoints_total <= 0:
+                self.max_datapoints_total = None
+        # Resume toggle: arg overrides env; default True
+        if resume is None:
+            env_resume = os.environ.get("DME_RESUME", "1")
+            self.resume = str(env_resume).lower() in {"1", "true", "yes"}
+        else:
+            self.resume = bool(resume)
+        # Initialize transforms and camera
+        self.set_augmentation_transforms()
+        self.set_camera(camera_name="homography")
 
-        self.set_augmentation_transforms() 
-        self.set_camera(camera_name="homography") 
+    # Resume helpers
+    def _resume_state_path(self, dataset_dir: str) -> str:
+        return os.path.join(dataset_dir, ".resume_state.json")
+
+    def _load_resume_state(self, dataset_type: str, dataset_dir: str) -> dict:
+        path = self._resume_state_path(dataset_dir)
+        try:
+            if os.path.isfile(path):
+                with open(path, "r") as f:
+                    state = json.load(f)
+                return state.get(dataset_type, {"done_ids": [], "complete": False})
+        except Exception:
+            pass
+        return {"done_ids": [], "complete": False}
+
+    def _write_full_resume_state(self, dataset_dir: str, dataset_type: str, data: dict):
+        path = self._resume_state_path(dataset_dir)
+        try:
+            full = {}
+            if os.path.isfile(path):
+                with open(path, "r") as f:
+                    try:
+                        full = json.load(f) or {}
+                    except Exception:
+                        full = {}
+            full[dataset_type] = data
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(full, f)
+            os.replace(tmp, path)
+        except Exception:
+            # Best-effort; ignore write errors
+            pass
+
+    def _save_resume_state(self, dataset_type: str, dataset_dir: str, done_ids: set, complete: bool = False):
+        data = {
+            "done_ids": sorted(list(done_ids)),
+            "complete": bool(complete),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._write_full_resume_state(dataset_dir, dataset_type, data)
+
+    def _datapoint_uid(self, dp) -> str:
+        """Stable id for a datapoint across runs, based on trailing numeric id in filenames."""
+        def _get_numeric_id(filename: str) -> str:
+            base = os.path.splitext(os.path.basename(filename))[0]
+            if base.endswith('_seg'):
+                base = base[:-4]
+            m = re.search(r'(\d+)$', base)
+            return m.group(1) if m else base
+        try:
+            if getattr(dp, "metadata_filepath", None):
+                return _get_numeric_id(dp.metadata_filepath)
+        except Exception:
+            pass
+        try:
+            if getattr(dp, "rgb_filepath", None):
+                return _get_numeric_id(dp.rgb_filepath)
+        except Exception:
+            pass
+        return f"dp_{id(dp)}"
 
     def _get_files_in_subfolder(self, folder, file_extension=None):
         """Helper method to get files in a subfolder, with an optional file extension filter."""
@@ -752,7 +886,7 @@ class DataProcessor:
         if rgb.max() <= 1.0:
             rgb = rgb * 255.0
 
-        # Try to get a color segmentation array
+        # Try to get a color segmentation array (prefer provided to avoid IO)
         seg_arr = None
         if seg_img is not None:
             seg_arr = np.array(seg_img)
@@ -776,14 +910,21 @@ class DataProcessor:
                     seg_arr = None
 
         # Build color map from metadata (BGR -> RGB)
-        color_map_rgb = {}
+        # Use cached color map if available
+        color_map_rgb = getattr(dp, '_color_map_rgb', None) or {}
         marker_tags = getattr(dp, 'active_markers', list(getattr(dp, 'marker_poses', {}).keys()))
-        for tag in marker_tags:
-            info = (getattr(dp, 'marker_info', {}) or {}).get(tag)
-            if info and info.get('seg_color_bgr') is not None:
-                bgr = info['seg_color_bgr']
-                if isinstance(bgr, (list, tuple)) and len(bgr) >= 3:
-                    color_map_rgb[tag] = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+        if not color_map_rgb:
+            # Fallback build once
+            for tag in marker_tags:
+                info = (getattr(dp, 'marker_info', {}) or {}).get(tag)
+                if info and info.get('seg_color_bgr') is not None:
+                    bgr = info['seg_color_bgr']
+                    if isinstance(bgr, (list, tuple)) and len(bgr) >= 3:
+                        color_map_rgb[tag] = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+            try:
+                dp._color_map_rgb = color_map_rgb
+            except Exception:
+                pass
 
         tag_stats = {}
         all_ok = True
@@ -807,17 +948,17 @@ class DataProcessor:
                 all_ok = False
                 continue
 
-            marker_pixels = np.argwhere(mask == 255)
-            if marker_pixels.size == 0:
+            m = (mask == 255)
+            if not np.any(m):
                 tag_stats[tag] = {'area': 0, 'mean': 0.0, 'contrast': 0.0, 'ok': False}
                 all_ok = False
                 continue
 
-            vals = rgb[marker_pixels[:, 0], marker_pixels[:, 1]]
+            vals = rgb[m]
             gray_vals = np.mean(vals, axis=1)
-            contrast = float(gray_vals.max() - gray_vals.min())
+            contrast = float(np.ptp(gray_vals))
             mean_val = float(gray_vals.mean())
-            area = int(marker_pixels.shape[0])
+            area = int(m.sum())
 
             ok = (mean_val > min_tag_pix_mean) and (mean_val < max_tag_pix_mean) and (contrast >= min_tag_pix_contrast)
             tag_stats[tag] = {
@@ -897,7 +1038,6 @@ class DataProcessor:
                     import matplotlib.pyplot as plt
                     plt.imshow(rgb_img)
                     plt.show()
-                    import pdb; pdb.set_trace()
 
             # Attach stats for downstream debugging/inspection
             dp.tag_stats = tag_stats
@@ -916,27 +1056,57 @@ class DataProcessor:
             if len(self.datapoints) > 0 and (idx % max(1, int(len(self.datapoints)/10)) == 0): 
                 print(f"[filter] Processed {idx} / {len(self.datapoints)} | kept={len(self.datapoints_filtered)} dropped={len(self.datapoints_filtered_out)}") 
                 
-    def split_train_val_data(self, filter=True, frac_train=0.8, num_points_max=-1):
-        """Split the datapoints into training and validation datasets."""
-        if num_points_max == -1: 
-            if filter: 
-                num_points = len(self.datapoints_filtered) 
-            else: 
-                num_points = len(self.datapoints)
-        else: 
-            if filter: 
-                num_points = np.min([num_points_max, len(self.datapoints_filtered)])
-            else: 
-                num_points = np.min([num_points_max, len(self.datapoints)])
+    def split_train_val_data(self, filter=True, frac_train=0.8, num_points_max=None):
+        """Split the datapoints into training and validation datasets.
+        - If num_points_max is provided, cap total (train + val) to this value.
+        - Else, if self.max_datapoints_total is set, use that cap.
+        - Else, use all available datapoints.
+        """
+        # Source pool
+        pool = self.datapoints_filtered if filter else self.datapoints
+        N_available = len(pool)
 
-        if filter: 
-            self.datapoints_train = random.sample(self.datapoints_filtered, int(frac_train * num_points))
-            non_training_datapoints = [dp for dp in self.datapoints_filtered if dp not in self.datapoints_train]
-            self.datapoints_val = random.sample(non_training_datapoints, int((1-frac_train) * num_points)) 
+        # Resolve cap
+        cap = None
+        if num_points_max is not None:
+            try:
+                cap = int(num_points_max)
+            except Exception:
+                cap = None
+        if cap is None:
+            cap = self.max_datapoints_total
+
+        if cap is None or cap < 0:
+            num_points = N_available
         else:
-            self.datapoints_train = random.sample(self.datapoints, int(frac_train * num_points)) 
-            non_training_datapoints = [dp for dp in self.datapoints if dp not in self.datapoints_train]
-            self.datapoints_val = random.sample(non_training_datapoints, int((1-frac_train) * num_points)) 
+            num_points = min(cap, N_available)
+
+        if num_points <= 0:
+            self.datapoints_train = []
+            self.datapoints_val = []
+            return
+
+        # Exact split counts (ensure train + val == num_points)
+        n_train = int(round(frac_train * num_points))
+        n_train = max(0, min(n_train, num_points))
+        n_val = num_points - n_train
+
+        # Sample without replacement
+        if num_points == N_available:
+            base = pool.copy()
+        else:
+            base = random.sample(pool, num_points)
+
+        if n_train > 0:
+            self.datapoints_train = random.sample(base, n_train)
+        else:
+            self.datapoints_train = []
+        remaining = [dp for dp in base if dp not in self.datapoints_train]
+        if n_val > 0 and remaining:
+            n_val = min(n_val, len(remaining))
+            self.datapoints_val = random.sample(remaining, n_val)
+        else:
+            self.datapoints_val = []
 
     def create_directories(self):
         """Create directories for training and validation data."""
@@ -1020,15 +1190,21 @@ class DataProcessor:
         return seg_img_resized
 
     def set_augmentation_transforms(self):
-        transform = A.Compose([
-                # A.RandomShadow(shadow_roi=(0,0,1,1), num_shadows_limit=(1,10), shadow_dimension=4, shadow_intensity_range =(0.5, 0.8), p=0.8),  # Apply random shadows to the image
-                A.Lambda(image=to_grayscale, p=1.0),                
-                A.RandomSunFlare(flare_roi=(0,0,1,1), num_flare_circles_range=(10,50), src_radius=100, src_color=(175,175,175), method="physics_based", p=0.9),  # Apply random sun flare to the image, TODO: come back to this, get labels 
-                A.GaussNoise(var_limit=(0,0.005), per_channel=True, p=1),  # Add noise to the image 
-                A.AdvancedBlur(blur_limit=(5,51), p=0.8),  # Apply blur to the image 
-                # A.RandomGamma(gamma_limit=(80, 120), p=0.8),  # Apply gamma correction to the image
-                A.RandomBrightnessContrast(brightness_limit=(-0.25,0.25), contrast_limit=(-0.95,0.95), p=0.8),  # Adjust brightness and contrast
-                # A.ISONoise(intensity=(0.1, 0.5), color_shift=(0.01, 0.05), p=0.8),  # Apply ISO noise to the image 
+        if getattr(self, 'fast_mode', False):
+            transform = A.Compose([
+                A.Lambda(image=to_grayscale, p=1.0),
+                A.GaussNoise(var_limit=(0, 0.002), per_channel=False, p=0.6),
+                A.AdvancedBlur(blur_limit=(3, 9), p=0.4),
+                A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.6, 0.6), p=0.6),
+            ])
+        else:
+            transform = A.Compose([
+                # A.RandomShadow(shadow_roi=(0,0,1,1), ...),
+                A.Lambda(image=to_grayscale, p=1.0),
+                A.RandomSunFlare(flare_roi=(0, 0, 1, 1), num_flare_circles_range=(10, 30), src_radius=80, src_color=(175, 175, 175), method="physics_based", p=0.5),
+                A.GaussNoise(var_limit=(0, 0.005), per_channel=True, p=1.0),
+                A.AdvancedBlur(blur_limit=(5, 31), p=0.7),
+                A.RandomBrightnessContrast(brightness_limit=(-0.25, 0.25), contrast_limit=(-0.95, 0.95), p=0.8),
             ])
         self.albumentations_transform = transform 
 
@@ -1120,313 +1296,346 @@ class DataProcessor:
                 os.makedirs(os.path.join(dataset_dir, "roi_rgb"), exist_ok=True)
                 os.makedirs(os.path.join(dataset_dir, "roi_keypoints"), exist_ok=True) 
 
+            # Load resume progress
+            done_ids = set()
+            if getattr(self, 'resume', False):
+                st = self._load_resume_state(dataset_type, dataset_dir)
+                done_ids = set(st.get('done_ids', []))
+                # mark as active/incomplete at start
+                self._save_resume_state(dataset_type, dataset_dir, done_ids, complete=False)
+
             # Process each datapoint in the current dataset
             print(f"[phase] Saving {dataset_type} data (N={len(datapoints)})")
             for i, dp in enumerate(tqdm(datapoints, desc=f"{dataset_type} save", unit="img")):
-                # Internal segmentation for checks/ROI only (may be synthesized)
-                seg_img = dp.preprocess_seg_img()
-                # Prefer copying the original segmentation file as-is when saving
-                seg_src_path = dp.seg_png_filepath if (dp.seg_png_filepath and os.path.isfile(dp.seg_png_filepath)) else None
-                if seg_src_path is None:
-                    # Try metadata outputs path
-                    try:
-                        seg_rel = (dp.outputs or {}).get("segmentation")
-                        if seg_rel and dp.dataset_root:
-                            cand = os.path.join(dp.dataset_root, seg_rel)
-                            if os.path.isfile(cand):
-                                seg_src_path = cand
-                    except Exception:
-                        pass
-                # Load RGB once for this datapoint (used by saving and summaries)
-                rgb_img = Image.open(dp.rgb_filepath)
-                augmented_img = None
-                if save_rgb:
-                    if num_augmentations == 0:
-                        # Optionally apply filter on the base image before saving
-                        if (not filter_base_images) or self.check_image_okay(np.array(rgb_img), seg_img):
-                            rgb_img.save(os.path.join(dataset_dir, "images", f"img_{i}.png"))
-                            if save_seg:
-                                seg_out = os.path.join(dataset_dir, "segmentations", f"seg_{i}.png")
-                                if seg_src_path is not None:
-                                    shutil.copyfile(seg_src_path, seg_out)
-                                else:
-                                    # Fallback: save synthesized binary mask
-                                    Image.fromarray(np.array(seg_img)).save(seg_out)
-                        else:
-                            # base image rejected by filter; skip saving
+                dp_uid = self._datapoint_uid(dp)
+                if getattr(self, 'resume', False) and dp_uid in done_ids:
+                    continue
+                try:
+                    # Internal segmentation for checks/ROI only (may be synthesized)
+                    seg_img = dp.preprocess_seg_img()
+                    # Prefer copying the original segmentation file as-is when saving
+                    seg_src_path = dp.seg_png_filepath if (dp.seg_png_filepath and os.path.isfile(dp.seg_png_filepath)) else None
+                    if seg_src_path is None:
+                        # Try metadata outputs path
+                        try:
+                            seg_rel = (dp.outputs or {}).get("segmentation")
+                            if seg_rel and dp.dataset_root:
+                                cand = os.path.join(dp.dataset_root, seg_rel)
+                                if os.path.isfile(cand):
+                                    seg_src_path = cand
+                        except Exception:
                             pass
+                    # Preload segmentation for checks (avoid repeated IO in retries)
+                    seg_for_checks = None
+                    if seg_src_path is not None and os.path.isfile(seg_src_path):
+                        try:
+                            with Image.open(seg_src_path) as _im_seg:
+                                seg_for_checks = np.array(_im_seg.convert('RGB'))
+                        except Exception:
+                            seg_for_checks = np.array(seg_img)
                     else:
-                        # For each requested augmentation, try up to max_tries_per_aug times until one passes the filter
-                        accepted = 0
-                        for j in range(num_augmentations):
-                            aug_result = self.augment_image(
-                                rgb_img, dp, seg=None,
-                                max_attempts_lighting=5,
-                                max_attempts_combined=max_tries_per_aug,
-                                min_tag_area=1000,
-                                min_tag_pix_mean=25,
-                                max_tag_pix_mean=250,
-                                min_tag_pix_contrast=10,
-                                allow_partial_marker_accept=allow_partial_marker_accept,
-                                partial_accept_min_fraction=partial_accept_min_fraction,
-                            )
-                            if aug_result is None:
-                                # rejected after retries; skip this augmentation index
-                                continue
-                            aug_np = aug_result['image'] if isinstance(aug_result, dict) else aug_result
-                            passed_tags = aug_result.get('passed_tags', getattr(dp, 'active_markers', [])) if isinstance(aug_result, dict) else getattr(dp, 'active_markers', [])
-                            failed_tags = aug_result.get('failed_tags', []) if isinstance(aug_result, dict) else []
-                            augmented_img = Image.fromarray(aug_np.astype(np.uint8))
-                            img_out_path = os.path.join(dataset_dir, "images", f"img_{i}_{accepted}.png")
-                            augmented_img.save(img_out_path)
-                            # Save matching segmentation for each augmentation by copying original if available
-                            if save_seg:
-                                seg_out = os.path.join(dataset_dir, "segmentations", f"seg_{i}_{accepted}.png")
-                                # Prepare a segmentation image, potentially removing failed tags
-                                seg_modified = None
-                                # Try to start from original colored segmentation if available
-                                base_seg_arr = None
-                                if seg_src_path is not None and os.path.isfile(seg_src_path):
-                                    try:
-                                        im = Image.open(seg_src_path)
-                                        # Use RGB for color comparisons; keep alpha if present when saving
-                                        base_seg_arr = np.array(im.convert('RGB'))
-                                        seg_mode = 'RGB'
-                                    except Exception:
-                                        base_seg_arr = None
-                                if base_seg_arr is None:
-                                    # Fallback: use synthesized combined mask
-                                    base_seg_arr = np.array(dp.preprocess_seg_img())
-                                    seg_mode = 'L'
-
-                                # Remove failed tags
-                                if len(failed_tags) == 0:
-                                    # No changes; copy original if available to keep file unchanged
+                        seg_for_checks = np.array(seg_img)
+                    # Load RGB once for this datapoint (used by saving and summaries)
+                    rgb_img = Image.open(dp.rgb_filepath)
+                    augmented_img = None
+                    if save_rgb:
+                        if num_augmentations == 0:
+                            # Optionally apply filter on the base image before saving
+                            if (not filter_base_images) or self.check_image_okay(np.array(rgb_img), seg_img):
+                                rgb_img.save(os.path.join(dataset_dir, "images", f"img_{i}.png"))
+                                if save_seg:
+                                    seg_out = os.path.join(dataset_dir, "segmentations", f"seg_{i}.png")
+                                    if seg_src_path is not None:
+                                        shutil.copyfile(seg_src_path, seg_out)
+                                    else:
+                                        # Fallback: save synthesized binary mask
+                                        Image.fromarray(np.array(seg_img)).save(seg_out)
+                            else:
+                                # base image rejected by filter; skip saving
+                                pass
+                        else:
+                            # For each requested augmentation, try up to max_tries_per_aug times until one passes the filter
+                            accepted = 0
+                            for j in range(num_augmentations):
+                                aug_result = self.augment_image(
+                                    rgb_img, dp, seg=seg_for_checks,
+                                    max_attempts_lighting=5,
+                                    max_attempts_combined=max_tries_per_aug,
+                                    min_tag_area=1000,
+                                    min_tag_pix_mean=25,
+                                    max_tag_pix_mean=250,
+                                    min_tag_pix_contrast=10,
+                                    allow_partial_marker_accept=allow_partial_marker_accept,
+                                    partial_accept_min_fraction=partial_accept_min_fraction,
+                                )
+                                if aug_result is None:
+                                    # rejected after retries; skip this augmentation index
+                                    continue
+                                aug_np = aug_result['image'] if isinstance(aug_result, dict) else aug_result
+                                passed_tags = aug_result.get('passed_tags', getattr(dp, 'active_markers', [])) if isinstance(aug_result, dict) else getattr(dp, 'active_markers', [])
+                                failed_tags = aug_result.get('failed_tags', []) if isinstance(aug_result, dict) else []
+                                augmented_img = Image.fromarray(aug_np.astype(np.uint8))
+                                img_out_path = os.path.join(dataset_dir, "images", f"img_{i}_{accepted}.png")
+                                augmented_img.save(img_out_path)
+                                # Save matching segmentation for each augmentation by copying original if available
+                                if save_seg:
+                                    seg_out = os.path.join(dataset_dir, "segmentations", f"seg_{i}_{accepted}.png")
+                                    # Prepare a segmentation image, potentially removing failed tags
+                                    seg_modified = None
+                                    # Try to start from original colored segmentation if available
+                                    base_seg_arr = None
                                     if seg_src_path is not None and os.path.isfile(seg_src_path):
                                         try:
-                                            shutil.copyfile(seg_src_path, seg_out)
-                                            seg_modified = None  # mark as already saved
+                                            im = Image.open(seg_src_path)
+                                            # Use RGB for color comparisons; keep alpha if present when saving
+                                            base_seg_arr = np.array(im.convert('RGB'))
+                                            seg_mode = 'RGB'
                                         except Exception:
+                                            base_seg_arr = None
+                                    if base_seg_arr is None:
+                                        # Fallback: use synthesized combined mask
+                                        base_seg_arr = np.array(dp.preprocess_seg_img())
+                                        seg_mode = 'L'
+
+                                    # Remove failed tags
+                                    if len(failed_tags) == 0:
+                                        # No changes; copy original if available to keep file unchanged
+                                        if seg_src_path is not None and os.path.isfile(seg_src_path):
+                                            try:
+                                                shutil.copyfile(seg_src_path, seg_out)
+                                                seg_modified = None  # mark as already saved
+                                            except Exception:
+                                                seg_modified = base_seg_arr
+                                        else:
                                             seg_modified = base_seg_arr
                                     else:
-                                        seg_modified = base_seg_arr
-                                else:
-                                    if base_seg_arr.ndim == 3 and base_seg_arr.shape[2] == 3:
-                                        # Color-coded segmentation; zero out pixels of failed tag colors
-                                        # Build color map (BGR -> RGB)
-                                        color_map_rgb = {}
-                                        for tag_name in getattr(dp, 'active_markers', []):
-                                            info = (getattr(dp, 'marker_info', {}) or {}).get(tag_name)
-                                            if info and info.get('seg_color_bgr') is not None:
-                                                bgr = info['seg_color_bgr']
-                                                if isinstance(bgr, (list, tuple)) and len(bgr) >= 3:
-                                                    color_map_rgb[tag_name] = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
-                                        seg_modified = base_seg_arr.copy()
-                                        bg = np.array(segmentation_background_color, dtype=np.uint8)
-                                        for t in failed_tags:
-                                            if t in color_map_rgb:
-                                                color = np.array(color_map_rgb[t], dtype=np.uint8)
-                                                mask = np.all(seg_modified == color, axis=-1)
-                                                seg_modified[mask] = bg
-                                    else:
-                                        # Binary/grayscale segmentation: subtract each failed tag's quad mask
-                                        seg_modified = base_seg_arr.copy()
-                                        if seg_modified.ndim == 3:
-                                            # convert to single channel if needed
-                                            seg_modified = cv2.cvtColor(seg_modified, cv2.COLOR_RGB2GRAY)
-                                        for t in failed_tags:
-                                            try:
-                                                mask_img = dp.preprocess_seg_img(tag_name=t)
-                                                mask = np.array(mask_img)
-                                                seg_modified[mask == 255] = 0
-                                            except Exception:
-                                                pass
-
-                                # Save modified segmentation (if not already copied)
-                                if seg_modified is not None:
-                                    try:
-                                        Image.fromarray(seg_modified.astype(np.uint8)).save(seg_out)
-                                    except Exception:
-                                        # Fallback to copying original if modification fails
-                                        if seg_src_path is not None:
-                                            shutil.copyfile(seg_src_path, seg_out)
+                                        if base_seg_arr.ndim == 3 and base_seg_arr.shape[2] == 3:
+                                            # Color-coded segmentation; zero out pixels of failed tag colors
+                                            # Build color map (BGR -> RGB)
+                                            color_map_rgb = {}
+                                            for tag_name in getattr(dp, 'active_markers', []):
+                                                info = (getattr(dp, 'marker_info', {}) or {}).get(tag_name)
+                                                if info and info.get('seg_color_bgr') is not None:
+                                                    bgr = info['seg_color_bgr']
+                                                    if isinstance(bgr, (list, tuple)) and len(bgr) >= 3:
+                                                        color_map_rgb[tag_name] = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+                                            seg_modified = base_seg_arr.copy()
+                                            bg = np.array(segmentation_background_color, dtype=np.uint8)
+                                            for t in failed_tags:
+                                                if t in color_map_rgb:
+                                                    color = np.array(color_map_rgb[t], dtype=np.uint8)
+                                                    mask = np.all(seg_modified == color, axis=-1)
+                                                    seg_modified[mask] = bg
                                         else:
-                                            Image.fromarray(np.array(seg_img)).save(seg_out)
-                            # Save filtered metadata per accepted augmentation, removing failed tags
-                            if save_metadata:
-                                try:
-                                    meta = copy.deepcopy(dp.metadata) if isinstance(dp.metadata, dict) else {}
-                                    markers_list = meta.get('markers', []) if isinstance(meta, dict) else []
-                                    # Build keep set from passed tag names
-                                    keep_ids = set()
-                                    keep_colors = set()
-                                    for t in passed_tags:
-                                        info = (getattr(dp, 'marker_info', {}) or {}).get(t)
-                                        if info is None:
-                                            continue
-                                        mid = info.get('marker_id')
-                                        if mid is not None:
-                                            keep_ids.add(mid)
-                                        col = info.get('seg_color_bgr')
-                                        if isinstance(col, (list, tuple)):
-                                            keep_colors.add(tuple(col))
-                                    def marker_keep(m):
+                                            # Binary/grayscale segmentation: subtract each failed tag's quad mask
+                                            seg_modified = base_seg_arr.copy()
+                                            if seg_modified.ndim == 3:
+                                                # convert to single channel if needed
+                                                seg_modified = cv2.cvtColor(seg_modified, cv2.COLOR_RGB2GRAY)
+                                            for t in failed_tags:
+                                                try:
+                                                    mask_img = dp.preprocess_seg_img(tag_name=t)
+                                                    mask = np.array(mask_img)
+                                                    seg_modified[mask == 255] = 0
+                                                except Exception:
+                                                    pass
+
+                                    # Save modified segmentation (if not already copied)
+                                    if seg_modified is not None:
                                         try:
-                                            mid = m.get('marker_id')
-                                            col = tuple(m.get('seg_color_bgr')) if isinstance(m.get('seg_color_bgr'), list) else m.get('seg_color_bgr')
-                                            return (mid in keep_ids) or (col in keep_colors)
+                                            Image.fromarray(seg_modified.astype(np.uint8)).save(seg_out)
                                         except Exception:
-                                            return False
-                                    filtered_markers = [m for m in markers_list if marker_keep(m)]
-                                    if isinstance(meta, dict):
-                                        meta['markers'] = filtered_markers
-                                    meta_out_path = os.path.join(dataset_dir, 'metadata', f"metadata_{i}_{accepted}.json")
-                                    with open(meta_out_path, 'w') as f:
-                                        json.dump(meta, f)
-                                except Exception:
-                                    # Fallback: write original metadata with suffix
-                                    meta_out_path = os.path.join(dataset_dir, 'metadata', f"metadata_{i}_{accepted}.json")
-                                    with open(meta_out_path, 'w') as f:
-                                        json.dump(dp.metadata, f)
-                            accepted += 1
-                # If not saving RGB, but still want seg (rare), copy base seg unchanged if available
-                if save_seg and num_augmentations == 0 and not save_rgb:
-                    seg_out = os.path.join(dataset_dir, "segmentations", f"seg_{i}.png")
-                    if seg_src_path is not None:
-                        shutil.copyfile(seg_src_path, seg_out)
-                    else:
-                        Image.fromarray(np.array(seg_img)).save(seg_out)
+                                            # Fallback to copying original if modification fails
+                                            if seg_src_path is not None:
+                                                shutil.copyfile(seg_src_path, seg_out)
+                                            else:
+                                                Image.fromarray(np.array(seg_img)).save(seg_out)
+                                # Save filtered metadata per accepted augmentation, removing failed tags
+                                if save_metadata:
+                                    try:
+                                        meta = copy.deepcopy(dp.metadata) if isinstance(dp.metadata, dict) else {}
+                                        markers_list = meta.get('markers', []) if isinstance(meta, dict) else []
+                                        # Build keep set from passed tag names
+                                        keep_ids = set()
+                                        keep_colors = set()
+                                        for t in passed_tags:
+                                            info = (getattr(dp, 'marker_info', {}) or {}).get(t)
+                                            if info is None:
+                                                continue
+                                            mid = info.get('marker_id')
+                                            if mid is not None:
+                                                keep_ids.add(mid)
+                                            col = info.get('seg_color_bgr')
+                                            if isinstance(col, (list, tuple)):
+                                                keep_colors.add(tuple(col))
+                                        def marker_keep(m):
+                                            try:
+                                                mid = m.get('marker_id')
+                                                col = tuple(m.get('seg_color_bgr')) if isinstance(m.get('seg_color_bgr'), list) else m.get('seg_color_bgr')
+                                                return (mid in keep_ids) or (col in keep_colors)
+                                            except Exception:
+                                                return False
+                                        filtered_markers = [m for m in markers_list if marker_keep(m)]
+                                        if isinstance(meta, dict):
+                                            meta['markers'] = filtered_markers
+                                        meta_out_path = os.path.join(dataset_dir, 'metadata', f"metadata_{i}_{accepted}.json")
+                                        with open(meta_out_path, 'w') as f:
+                                            json.dump(meta, f)
+                                    except Exception:
+                                        # Fallback: write original metadata with suffix
+                                        meta_out_path = os.path.join(dataset_dir, 'metadata', f"metadata_{i}_{accepted}.json")
+                                        with open(meta_out_path, 'w') as f:
+                                            json.dump(dp.metadata, f)
+                                accepted += 1
+                    # If not saving RGB, but still want seg (rare), copy base seg unchanged if available
+                    if save_seg and num_augmentations == 0 and not save_rgb:
+                        seg_out = os.path.join(dataset_dir, "segmentations", f"seg_{i}.png")
+                        if seg_src_path is not None:
+                            shutil.copyfile(seg_src_path, seg_out)
+                        else:
+                            Image.fromarray(np.array(seg_img)).save(seg_out)
 
-                if save_keypoints:
-                    keypoints = dp.compute_keypoints(self.keypoints_tag_frame, self.camera_matrix)
-                    # Save as nested dict: { tag: [ [u,v], ... ] }
-                    keypoints_json = {tag: [kp.tolist() for kp in uv_list] for tag, uv_list in keypoints.items()}
-                    with open(os.path.join(dataset_dir, "keypoints", f"keypoints_{i}.json"), 'w') as f:
-                        json.dump(keypoints_json, f)
+                    if save_keypoints:
+                        keypoints = dp.compute_keypoints(self.keypoints_tag_frame, self.camera_matrix)
+                        # Save as nested dict: { tag: [ [u,v], ... ] }
+                        keypoints_json = {tag: [kp.tolist() for kp in uv_list] for tag, uv_list in keypoints.items()}
+                        with open(os.path.join(dataset_dir, "keypoints", f"keypoints_{i}.json"), 'w') as f:
+                            json.dump(keypoints_json, f)
 
-                if save_metadata:
-                    # Base (no augmentation): original metadata
-                    if num_augmentations == 0:
-                        metadata = dp.metadata
-                        with open(os.path.join(dataset_dir, "metadata", f"metadata_{i}.json"), 'w') as f:
-                            json.dump(metadata, f)
-                    else:
-                        # For augmented outputs, write one metadata file per accepted augmentation index
-                        # We need to mirror the accepted count; re-derive filenames present in images dir
-                        # Simpler: regenerate metadata alongside image/seg save inside the augmentation loop
-                        pass
-
-                if save_roi:
-                    # Save one combined ROI based on combined mask, plus optional per-marker ROIs
-                    roi_image, roi_coordinates, roi_center = dp.get_roi_image(seg=seg_img)
-                    roi_image_pil = Image.fromarray(roi_image)
-                    roi_image_pil.save(os.path.join(dataset_dir, "roi_rgb", f"roi_{i}.png"))
-                    roi_keypoints = dp.get_roi_keypoints()
-                    if roi_keypoints is not None:
-                        roi_keypoints_json = {f"keypoints_{k}": kp.tolist() for k, kp in enumerate(roi_keypoints)}
-                        with open(os.path.join(dataset_dir, "roi_keypoints", f"roi_keypoints_{i}.json"), 'w') as f:
-                            json.dump(roi_keypoints_json, f)
-                    # Additionally, per-marker ROIs if segmentation allows
-                    for tag_name in getattr(dp, "active_markers", []):
-                        try:
-                            tag_seg = dp.preprocess_seg_img(tag_name=tag_name)
-                            tag_roi_img, _, _ = dp.get_roi_image(seg=tag_seg, tag_name=tag_name)
-                            Image.fromarray(tag_roi_img).save(os.path.join(dataset_dir, "roi_rgb", f"roi_{i}_{tag_name}.png"))
-                            tag_roi_kps = dp.get_roi_keypoints(tag_name=tag_name)
-                            if tag_roi_kps is not None:
-                                roi_kp_json = {f"keypoints_{k}": kp.tolist() for k, kp in enumerate(tag_roi_kps)}
-                                with open(os.path.join(dataset_dir, "roi_keypoints", f"roi_keypoints_{i}_{tag_name}.json"), 'w') as f:
-                                    json.dump(roi_kp_json, f)
-                        except Exception:
-                            # If per-tag color not available, skip silently
+                    if save_metadata:
+                        # Base (no augmentation): original metadata
+                        if num_augmentations == 0:
+                            metadata = dp.metadata
+                            with open(os.path.join(dataset_dir, "metadata", f"metadata_{i}.json"), 'w') as f:
+                                json.dump(metadata, f)
+                        else:
+                            # For augmented outputs, write one metadata file per accepted augmentation index
+                            # We need to mirror the accepted count; re-derive filenames present in images dir
+                            # Simpler: regenerate metadata alongside image/seg save inside the augmentation loop
                             pass
 
-                if save_summary_image:
-                    # Check if images are loaded correctly
-                    if rgb_img is None:
-                        raise ValueError(f"RGB image at {dp.rgb_filepath} could not be loaded.")
-                    if seg_img is None:
-                        raise ValueError(f"Segmentation image at {dp.seg_png_filepath} could not be loaded.")
-
-                    # Convert from BGR (OpenCV default) to RGB (for matplotlib)
-                    image_rgb = np.array(rgb_img)
-                    if augmented_img is None:
-                        augmented_img_rgb = image_rgb
-                    else:
-                        augmented_img_rgb = np.array(augmented_img)
-
-                    # Create a new figure for each image
-                    plt.figure(figsize=(12, 8))  # Adjust figure size to make space for metadata and the new ROI subplot
-
-                    # Subplot for original RGB image
-                    plt.subplot(2, 3, 1)  # 2 rows, 3 columns, 1st subplot
-                    plt.imshow(image_rgb)
-                    plt.axis('off')  # Hide axes
-                    plt.title(f'Original Image {i}')
-
-                    # Subplot for augmented RGB image
-                    plt.subplot(2, 3, 2)  # 2 rows, 3 columns, 2nd subplot
-                    plt.imshow(augmented_img_rgb)
-                    plt.axis('off')  # Hide axes
-                    plt.title(f'Augmented Image {i}')
-
-                    # Subplot for segmentation image
-                    plt.subplot(2, 3, 3)  # 2 rows, 3 columns, 3rd subplot
-                    plt.imshow(seg_img, cmap='viridis')  # Use a colormap for better visualization
-                    plt.axis('off')  # Hide axes
-                    plt.title(f'Segmentation Image {i}')
-
-                    # Subplot for RGB image - keypoints
-                    # Flatten keypoints across markers for visualization
-                    flat_kps = []
-                    if isinstance(keypoints, dict):
-                        for lst in keypoints.values():
-                            flat_kps.extend(lst)
-                    else:
-                        flat_kps = keypoints
-                    keypoints_image = overlay_points_on_image(image=np.array(augmented_img_rgb), pixel_points=flat_kps, radius=1)
-                    plt.subplot(2, 3, 4)  # 2 rows, 3 columns, 4th subplot
-                    plt.imshow(keypoints_image)
-                    plt.axis('off')  # Hide axes
-                    plt.title(f'Keypoints Image {i}')
-
-                    if True: #save_roi:
-
-                        # Ensure ROI computed locally for summary
-                        roi_image, _, _ = dp.get_roi_image(seg=seg_img)
+                    if save_roi:
+                        # Save one combined ROI based on combined mask, plus optional per-marker ROIs
+                        roi_image, roi_coordinates, roi_center = dp.get_roi_image(seg=seg_img)
+                        roi_image_pil = Image.fromarray(roi_image)
+                        roi_image_pil.save(os.path.join(dataset_dir, "roi_rgb", f"roi_{i}.png"))
                         roi_keypoints = dp.get_roi_keypoints()
+                        if roi_keypoints is not None:
+                            roi_keypoints_json = {f"keypoints_{k}": kp.tolist() for k, kp in enumerate(roi_keypoints)}
+                            with open(os.path.join(dataset_dir, "roi_keypoints", f"roi_keypoints_{i}.json"), 'w') as f:
+                                json.dump(roi_keypoints_json, f)
+                        # Additionally, per-marker ROIs if segmentation allows
+                        for tag_name in getattr(dp, "active_markers", []):
+                            try:
+                                tag_seg = dp.preprocess_seg_img(tag_name=tag_name)
+                                tag_roi_img, _, _ = dp.get_roi_image(seg=tag_seg, tag_name=tag_name)
+                                Image.fromarray(tag_roi_img).save(os.path.join(dataset_dir, "roi_rgb", f"roi_{i}_{tag_name}.png"))
+                                tag_roi_kps = dp.get_roi_keypoints(tag_name=tag_name)
+                                if tag_roi_kps is not None:
+                                    roi_kp_json = {f"keypoints_{k}": kp.tolist() for k, kp in enumerate(tag_roi_kps)}
+                                    with open(os.path.join(dataset_dir, "roi_keypoints", f"roi_keypoints_{i}_{tag_name}.json"), 'w') as f:
+                                        json.dump(roi_kp_json, f)
+                            except Exception:
+                                # If per-tag color not available, skip silently
+                                pass
 
-                        # Subplot for ROI image
-                        plt.subplot(2, 3, 5)  # 2 rows, 3 columns, 5th subplot
-                        plt.imshow(roi_image)
+                    if save_summary_image:
+                        # Check if images are loaded correctly
+                        if rgb_img is None:
+                            raise ValueError(f"RGB image at {dp.rgb_filepath} could not be loaded.")
+                        if seg_img is None:
+                            raise ValueError(f"Segmentation image at {dp.seg_png_filepath} could not be loaded.")
+
+                        # Convert from BGR (OpenCV default) to RGB (for matplotlib)
+                        image_rgb = np.array(rgb_img)
+                        if augmented_img is None:
+                            augmented_img_rgb = image_rgb
+                        else:
+                            augmented_img_rgb = np.array(augmented_img)
+
+                        # Create a new figure for each image
+                        plt.figure(figsize=(12, 8))  # Adjust figure size to make space for metadata and the new ROI subplot
+
+                        # Subplot for original RGB image
+                        plt.subplot(2, 3, 1)  # 2 rows, 3 columns, 1st subplot
+                        plt.imshow(image_rgb)
                         plt.axis('off')  # Hide axes
-                        plt.title(f'ROI Image {i}')
+                        plt.title(f'Original Image {i}')
 
-                        # Subplot for ROI image with keypoints 
-                        roi_keypoints_image = overlay_points_on_image(image=np.array(roi_image), pixel_points=roi_keypoints, radius=1)
-                        plt.subplot(2, 3, 6)  # 2 rows, 3 columns, 6th subplot
-                        plt.imshow(roi_keypoints_image)
+                        # Subplot for augmented RGB image
+                        plt.subplot(2, 3, 2)  # 2 rows, 3 columns, 2nd subplot
+                        plt.imshow(augmented_img_rgb)
                         plt.axis('off')  # Hide axes
-                        plt.title(f'ROI Keypoints Image {i}')
-                    
-                    # Display metadata as text in a separate area
-                    metadata_str = dp.__repr__()
+                        plt.title(f'Augmented Image {i}')
 
-                    # Create a new subplot for metadata
-                    plt.text(1.05, 0.5, metadata_str, fontsize=12, ha='left', va='center', transform=plt.gca().transAxes,
-                            bbox=dict(facecolor='white', alpha=0.7, edgecolor='black', boxstyle='round,pad=1'))
+                        # Subplot for segmentation image
+                        plt.subplot(2, 3, 3)  # 2 rows, 3 columns, 3rd subplot
+                        plt.imshow(seg_img, cmap='viridis')  # Use a colormap for better visualization
+                        plt.axis('off')  # Hide axes
+                        plt.title(f'Segmentation Image {i}')
 
-                    # Adjust layout to avoid overlap and make space for metadata
-                    plt.tight_layout()  # Adjust layout
-                    plt.subplots_adjust(right=0.8)  # Make space for metadata on the right
+                        # Subplot for RGB image - keypoints
+                        # Flatten keypoints across markers for visualization
+                        flat_kps = []
+                        if isinstance(keypoints, dict):
+                            for lst in keypoints.values():
+                                flat_kps.extend(lst)
+                        else:
+                            flat_kps = keypoints
+                        keypoints_image = overlay_points_on_image(image=np.array(augmented_img_rgb), pixel_points=flat_kps, radius=1)
+                        plt.subplot(2, 3, 4)  # 2 rows, 3 columns, 4th subplot
+                        plt.imshow(keypoints_image)
+                        plt.axis('off')  # Hide axes
+                        plt.title(f'Keypoints Image {i}')
 
-                    # Save the image to the summary_images folder
-                    save_path = os.path.join(dataset_dir, "summary_images", f"summary_image_{i}.png")
-                    plt.savefig(save_path, bbox_inches='tight', dpi=300)  # Save with high resolution
-                    plt.close()  # Close the plot to free up memory
+                        if True: #save_roi:
+
+                            # Ensure ROI computed locally for summary
+                            roi_image, _, _ = dp.get_roi_image(seg=seg_img)
+                            roi_keypoints = dp.get_roi_keypoints()
+
+                            # Subplot for ROI image
+                            plt.subplot(2, 3, 5)  # 2 rows, 3 columns, 5th subplot
+                            plt.imshow(roi_image)
+                            plt.axis('off')  # Hide axes
+                            plt.title(f'ROI Image {i}')
+
+                            # Subplot for ROI image with keypoints 
+                            roi_keypoints_image = overlay_points_on_image(image=np.array(roi_image), pixel_points=roi_keypoints, radius=1)
+                            plt.subplot(2, 3, 6)  # 2 rows, 3 columns, 6th subplot
+                            plt.imshow(roi_keypoints_image)
+                            plt.axis('off')  # Hide axes
+                            plt.title(f'ROI Keypoints Image {i}')
+                        
+                        # Display metadata as text in a separate area
+                        metadata_str = dp.__repr__()
+
+                        # Create a new subplot for metadata
+                        plt.text(1.05, 0.5, metadata_str, fontsize=12, ha='left', va='center', transform=plt.gca().transAxes,
+                                bbox=dict(facecolor='white', alpha=0.7, edgecolor='black', boxstyle='round,pad=1'))
+
+                        # Adjust layout to avoid overlap and make space for metadata
+                        plt.tight_layout()  # Adjust layout
+                        plt.subplots_adjust(right=0.8)  # Make space for metadata on the right
+
+                        # Save the image to the summary_images folder
+                        save_path = os.path.join(dataset_dir, "summary_images", f"summary_image_{i}.png")
+                        plt.savefig(save_path, bbox_inches='tight', dpi=300)  # Save with high resolution
+                        plt.close()  # Close the plot to free up memory
+
+                    # Mark datapoint as done and persist periodically
+                    if getattr(self, 'resume', False):
+                        done_ids.add(dp_uid)
+                        if (i % max(1, len(datapoints)//20 + 1)) == 0:
+                            self._save_resume_state(dataset_type, dataset_dir, done_ids, complete=False)
+                except Exception as e:
+                    print(f"[warn] Skipping datapoint due to error ({dataset_type} idx={i}, uid={dp_uid}): {e}")
+                    continue
 
 
             print(f"[phase] Completed saving {dataset_type} data.") 
+            if getattr(self, 'resume', False):
+                self._save_resume_state(dataset_type, dataset_dir, done_ids, complete=True)
 
 if __name__ == "__main__":
     print("[phase] Initialization")
@@ -1484,12 +1693,13 @@ if __name__ == "__main__":
     print("[phase] Preparing output directory")
     out_root = os.path.join("/home/nom4d/deep-marker-estimation/", "data_generation", "multi_marker_augmented_output")
     os.makedirs(out_root, exist_ok=True)
-    OUT_DIR = os.path.join(out_root, f"multi_marker_augmented_{time.strftime('%Y%m%d-%H%M%S')}")
+    # OUT_DIR = os.path.join(out_root, f"multi_marker_augmented_{time.strftime('%Y%m%d-%H%M%S')}")
+    OUT_DIR = "/home/nom4d/deep-marker-estimation/data_generation/multi_marker_augmented_output/multi_marker_augmented_20251016-211026/"
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f"[info] Output directory: {OUT_DIR}")
 
     print("[phase] Initializing processor and camera/marker configs")
-    processor = DataProcessor(data_folders, OUT_DIR)
+    processor = DataProcessor(data_folders, OUT_DIR, max_datapoints_total=25)
     processor.set_marker(image_path=None, num_squares=8, side_length=0.100)
 
     print("[phase] Scanning and pairing files")
