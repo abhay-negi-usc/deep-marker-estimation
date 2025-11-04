@@ -10,3 +10,5 @@ deep_marker_estimation/__pycache__
 output 
 data_generation/assets 
 data_generation/multi_marker_output 
+wandb/
+segmentation_model/sample_preds

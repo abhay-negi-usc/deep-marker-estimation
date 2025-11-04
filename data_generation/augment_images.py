@@ -1225,8 +1225,8 @@ class DataProcessor:
         for attempt in range(max_attempts_combined):
             # photometric augmentation
             aug = self.albumentations_transform(image=base)["image"]
-            if attempt < max_attempts_lighting:
-                aug = lighting_augmentation(aug)
+            # if attempt < max_attempts_lighting:
+            #     aug = lighting_augmentation(aug)
             # apply filter on augmented image
             all_ok, tag_stats = self.check_image_okay_multi_marker(
                 aug, dp, seg_img=seg,
@@ -1639,8 +1639,8 @@ class DataProcessor:
 
 if __name__ == "__main__":
     print("[phase] Initialization")
-    # DATA_ROOT = "/home/nom4d/deep-marker-estimation/data_generation/multi_marker_output/"
-    DATA_ROOT = "/home/nom4d/deep-marker-estimation/data_generation/test/"
+    DATA_ROOT = "/home/nom4d/deep-marker-estimation/data_generation/multi_marker_output/"
+    # DATA_ROOT = "/home/nom4d/deep-marker-estimation/data_generation/test/"
 
     def is_dataset_dir(path: str) -> bool:
         return (
@@ -1693,13 +1693,13 @@ if __name__ == "__main__":
     print("[phase] Preparing output directory")
     out_root = os.path.join("/home/nom4d/deep-marker-estimation/", "data_generation", "multi_marker_augmented_output")
     os.makedirs(out_root, exist_ok=True)
-    # OUT_DIR = os.path.join(out_root, f"multi_marker_augmented_{time.strftime('%Y%m%d-%H%M%S')}")
-    OUT_DIR = "/home/nom4d/deep-marker-estimation/data_generation/multi_marker_augmented_output/multi_marker_augmented_20251016-211026/"
+    OUT_DIR = os.path.join(out_root, f"multi_marker_augmented_{time.strftime('%Y%m%d-%H%M%S')}")
+    # OUT_DIR = "/home/nom4d/deep-marker-estimation/data_generation/multi_marker_augmented_output/multi_marker_augmented_20251016-211723/"
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f"[info] Output directory: {OUT_DIR}")
 
     print("[phase] Initializing processor and camera/marker configs")
-    processor = DataProcessor(data_folders, OUT_DIR, max_datapoints_total=25)
+    processor = DataProcessor(data_folders, OUT_DIR, max_datapoints_total=50_000)
     processor.set_marker(image_path=None, num_squares=8, side_length=0.100)
 
     print("[phase] Scanning and pairing files")
