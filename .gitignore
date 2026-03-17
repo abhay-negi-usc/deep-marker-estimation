@@ -12,3 +12,5 @@ data_generation/assets
 data_generation/multi_marker_output 
 wandb/
 segmentation_model/sample_preds
+keypoints_model/checkpoints 
+saved_predictions/*

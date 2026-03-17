@@ -26,6 +26,15 @@ Inputs (CONFIG):
 - n_images: how many images to generate
  - output directory naming: images are saved under '<output_dir>/multi_marker_{timestamp}/...'
  - save_bw: if True, save RGB images as single-channel grayscale instead of BGR
+- keypoints_grid_size: integer N — project an N×N uniform grid of points on each
+    marker face (z=0 plane) into image coordinates.  N=1 gives only the centre,
+    N=2 gives the four corners (same as quad_px), N=9 gives an 81-point grid, etc.
+    Keypoints are stored in every per-image metadata JSON under each marker entry
+    as "keypoints": list of {"row":r,"col":c,"marker_xy_m":[x,y],
+    "image_xy_px":[u,v],"visible":bool}.
+- save_keypoint_debug_images: bool — if True, save an extra debug image per
+    rendered frame into '<output_dir>/keypoints_debug/' with every keypoint drawn
+    as a coloured circle and the inter-point grid lines overlaid.
 
 Coordinate frames and conventions:
 - OpenCV camera coords: +x right, +y down, +z forward
@@ -53,15 +62,19 @@ from typing import List, Tuple
 # ------------------------ Configuration ------------------------
 CONFIG = {
     # Canvas / output
-    "output_size_wh": [1920, 1200],  # width, height (px)
+    # "output_size_wh": [1920, 1200],  # width, height (px)
+    "output_size_wh": [960, 600],  # width, height (px)
 
     # IO directories
     "background_dir": "/home/anegi/Downloads/test2017/",
     "marker_dir": "data_generation/assets/tag36h11_no_border_64",
 
-    # Camera intrinsics (example; replace with yours)
-    "K": [[1400.0,   0.0, 960.0],
-          [  0.0, 1400.0, 600.0],
+    # Camera intrinsics 
+    # "K": [[1400.0,   0.0, 960.0],
+    #       [  0.0, 1400.0, 600.0],
+    #       [  0.0,    0.0,   1.0]],
+    "K": [[700.0,   0.0, 480.0],
+          [  0.0, 700.0, 300.0],
           [  0.0,    0.0,   1.0]],
     "dist": [0, 0, 0, 0, 0],         # zeros if no distortion
 
@@ -88,12 +101,12 @@ CONFIG = {
     # Use either fixed num_markers or a range (inclusive)
     # "num_markers": 2,
     "num_markers_range": [8, 16],
-    "n_images": 1_000,
+    "n_images": 100_000,
     # Base output directory; a timestamped subdir 'multi_marker_{YYYYmmdd-HHMMSS}' will be created inside
     "output_dir": "data_generation/multi_marker_output",
 
     # Save RGB images as grayscale (BW) if True; segmentation remains colored
-    "save_bw": False,
+    "save_bw": True,
 
     # Pose randomization ranges
     "tvec_ranges_m": [[-1.0, 1.0], [-1.0, 1.0], [0.2, 2.0]],
@@ -112,6 +125,14 @@ CONFIG = {
     }, 
 
     "num_workers": 24,  # how many parallel worker processes to use (adjust to your CPU)
+
+    # ---------- Keypoint output ----------
+    # Number of grid points along each axis of the marker face.
+    # An N×N grid is projected; e.g. grid_size=9 → 81 keypoints per marker.
+    # N=1 → marker centre only.  N=2 → the four corners (matches quad_px).
+    "keypoints_grid_size": 9,
+    # If True, save a debug image per frame with keypoints + grid lines overlaid.
+    "save_keypoint_debug_images": False,
 }
 
 # ------------------------ Helpers ------------------------
@@ -196,6 +217,138 @@ def project_marker_corners(marker_len_m, K, dist, rvec, tvec):
     ], dtype=np.float32)
     corners_2d, _ = cv2.projectPoints(corners_3d, rvec, tvec, K, dist)
     return corners_2d.reshape(-1, 2)  # (4,2)
+
+
+def project_marker_keypoints(
+    marker_len_m: float,
+    K: np.ndarray,
+    dist: np.ndarray,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    grid_size: int,
+    out_w: int,
+    out_h: int,
+) -> list:
+    """
+    Project an N×N uniform grid of points that lies on the marker face (z=0 plane)
+    into image coordinates, where N = grid_size.
+
+    Grid layout (marker frame, z=0):
+      - Row index 0 → y = -L/2  (top edge)
+      - Row index N-1 → y = +L/2 (bottom edge)
+      - Col index 0 → x = -L/2  (left edge)
+      - Col index N-1 → x = +L/2 (right edge)
+
+    For grid_size=1 only the centre (0,0) is returned.
+    For grid_size=2 the four corners are returned (equivalent to quad_px).
+
+    Returns a list of dicts:
+        {
+            "row": int,              # 0 … N-1
+            "col": int,              # 0 … N-1
+            "marker_xy_m": [x, y],  # 3-D position on the marker plane (metres)
+            "image_xy_px": [u, v],  # projected pixel coordinates (float)
+            "visible": bool,         # True if the point falls inside the image frame
+        }
+    """
+    L = float(marker_len_m)
+    N = int(grid_size)
+    if N < 1:
+        raise ValueError(f"keypoints_grid_size must be >= 1, got {N}")
+
+    if N == 1:
+        xs = [0.0]
+        ys = [0.0]
+    else:
+        xs = [L * (c / (N - 1) - 0.5) for c in range(N)]
+        ys = [L * (r / (N - 1) - 0.5) for r in range(N)]
+
+    pts_3d = np.array(
+        [[xs[c], ys[r], 0.0] for r in range(N) for c in range(N)],
+        dtype=np.float32,
+    )  # shape (N*N, 3)
+
+    pts_2d, _ = cv2.projectPoints(pts_3d, rvec, tvec, K, dist)
+    pts_2d = pts_2d.reshape(-1, 2)  # (N*N, 2)
+
+    keypoints = []
+    for idx in range(N * N):
+        r = idx // N
+        c = idx % N
+        u, v = float(pts_2d[idx, 0]), float(pts_2d[idx, 1])
+        visible = (
+            math.isfinite(u) and math.isfinite(v)
+            and 0.0 <= u <= out_w - 1
+            and 0.0 <= v <= out_h - 1
+        )
+        keypoints.append({
+            "row": r,
+            "col": c,
+            "marker_xy_m": [float(xs[c]), float(ys[r])],
+            "image_xy_px": [u, v],
+            "visible": visible,
+        })
+    return keypoints
+
+
+def draw_keypoints_on_image(
+    img_bgr: np.ndarray,
+    keypoints: list,
+    grid_size: int,
+    color_bgr: Tuple[int, int, int],
+    radius: int = 4,
+    line_thickness: int = 1,
+) -> np.ndarray:
+    """
+    Draw an N×N keypoint grid overlay on a copy of *img_bgr*.
+
+    - Visible points are drawn as filled circles in *color_bgr*.
+    - Off-frame points are skipped.
+    - Horizontal and vertical grid lines connect adjacent visible keypoints
+      using a slightly dimmed version of *color_bgr*.
+
+    Returns a new BGR image (same size as input).
+    """
+    out = img_bgr.copy()
+    N = int(grid_size)
+
+    # Build a lookup: (row, col) → (u, v) | None
+    grid: dict[tuple, tuple | None] = {}
+    for kp in keypoints:
+        r, c = kp["row"], kp["col"]
+        if kp["visible"]:
+            u, v = kp["image_xy_px"]
+            grid[(r, c)] = (int(round(u)), int(round(v)))
+        else:
+            grid[(r, c)] = None
+
+    # Dimmed line colour (50 % darkened)
+    line_color = tuple(max(0, ch // 2) for ch in color_bgr)
+
+    # Draw grid lines (horizontal then vertical)
+    for r in range(N):
+        for c in range(N - 1):
+            p1 = grid.get((r, c))
+            p2 = grid.get((r, c + 1))
+            if p1 and p2:
+                cv2.line(out, p1, p2, line_color, line_thickness, cv2.LINE_AA)
+    for r in range(N - 1):
+        for c in range(N):
+            p1 = grid.get((r, c))
+            p2 = grid.get((r + 1, c))
+            if p1 and p2:
+                cv2.line(out, p1, p2, line_color, line_thickness, cv2.LINE_AA)
+
+    # Draw keypoint circles on top of lines
+    for kp in keypoints:
+        if kp["visible"]:
+            u, v = kp["image_xy_px"]
+            pt = (int(round(u)), int(round(v)))
+            cv2.circle(out, pt, radius, color_bgr, -1, cv2.LINE_AA)
+            # White outline for visibility against dark backgrounds
+            cv2.circle(out, pt, radius, (255, 255, 255), 1, cv2.LINE_AA)
+
+    return out
 
 def warp_marker_onto_canvas(base_bgr, marker_img, quad_2d, out_w, out_h):
     """
@@ -446,6 +599,7 @@ def _render_one_image(
     images_dir: str,
     seg_dir: str,
     metadata_dir: str,
+    keypoints_debug_dir: str,  # empty string → no debug images
 ):
     # Seed randomness per-process and per-index for diversity
     try:
@@ -459,6 +613,7 @@ def _render_one_image(
     images_dir = Path(images_dir)
     seg_dir = Path(seg_dir)
     metadata_dir = Path(metadata_dir)
+    kp_debug_dir = Path(keypoints_debug_dir) if keypoints_debug_dir else None
 
     # Shallow copies of ranges from cfg
     euler_ranges = cfg.get("euler_deg_ranges_xyz", [[0, 0], [0, 0], [0, 0]])
@@ -479,6 +634,13 @@ def _render_one_image(
     out_img = canvas
     seg_img = np.zeros((out_h, out_w, 3), dtype=np.uint8)  # colored per marker id
     markers_info = []
+
+    # Keypoint grid configuration
+    grid_size = max(1, int(cfg.get("keypoints_grid_size", 9)))
+    # debug_img starts as a copy of the final rendered image; built after all markers
+    # are composited.  We accumulate keypoints and draw them all at the end so that
+    # later markers' overlays are visible on top of earlier ones.
+    kp_debug_data: list[tuple] = []  # (keypoints, color_bgr) per marker
 
     # Marker count
     fixed_n = cfg.get("num_markers")
@@ -546,6 +708,20 @@ def _render_one_image(
         if cfg.get("draw_axes", False):
             draw_axes(out_img, K, dist, rvec, tvec, axes_len_m=cfg.get("axes_len_m", 0.05))
 
+        # Project keypoint grid onto the marker face
+        keypoints = project_marker_keypoints(
+            marker_len_m=float(cfg["marker_length_m"]),
+            K=K,
+            dist=dist,
+            rvec=rvec,
+            tvec=tvec,
+            grid_size=grid_size,
+            out_w=out_w,
+            out_h=out_h,
+        )
+        if kp_debug_dir is not None:
+            kp_debug_data.append((keypoints, color_bgr))
+
         # Build 4x4 transform T_cam_marker from rvec/tvec
         Rm, _ = cv2.Rodrigues(rvec)
         T = np.eye(4, dtype=float)
@@ -569,10 +745,36 @@ def _render_one_image(
             # Legacy keys preserved for compatibility
             "border_drawn": bool(white_rect_drawn),
             "border_thickness_px": 0,
+            # Keypoints: N×N grid projected onto the marker face (z=0 plane)
+            # Each entry: {row, col, marker_xy_m, image_xy_px, visible}
+            "keypoints_grid_size": grid_size,
+            "keypoints": keypoints,
         })
 
     # Overlay number of markers on the RGB image
     put_text_with_outline(out_img, f"{n_markers} markers", org=(10, 36), font_scale=1.0)
+
+    # --- Keypoint debug image (optional) ---
+    # Drawn on the fully composited out_img so all markers are visible.
+    if kp_debug_dir is not None and kp_debug_data:
+        debug_img = out_img.copy()
+        # Scale dot radius relative to image width so it looks good at any resolution
+        dot_radius = max(3, out_w // 300)
+        line_thick = max(1, out_w // 800)
+        for kp_list, c_bgr in kp_debug_data:
+            debug_img = draw_keypoints_on_image(
+                debug_img, kp_list, grid_size, c_bgr,
+                radius=dot_radius,
+                line_thickness=line_thick,
+            )
+        put_text_with_outline(
+            debug_img,
+            f"kp grid={grid_size}x{grid_size}",
+            org=(10, 72),
+            font_scale=0.9,
+        )
+        kp_debug_path = kp_debug_dir / f"rendered_{i:05d}_kp.png"
+        cv2.imwrite(str(kp_debug_path), debug_img)
 
     # Save RGB image (optionally grayscale) and segmentation for this iteration
     out_path = images_dir / f"rendered_{i:05d}.png"
@@ -586,6 +788,11 @@ def _render_one_image(
     cv2.imwrite(str(seg_path), seg_img)
 
     # Save metadata JSON
+    kp_debug_rel = (
+        str((kp_debug_dir / f"rendered_{i:05d}_kp.png").relative_to(kp_debug_dir.parent))
+        if (kp_debug_dir is not None and kp_debug_data)
+        else None
+    )
     meta = {
         "index": int(i),
         "n_markers": int(n_markers),
@@ -596,9 +803,11 @@ def _render_one_image(
             "dist": dist.tolist(),
         },
         "marker_length_m": float(cfg["marker_length_m"]),
+        "keypoints_grid_size": grid_size,
         "outputs": {
             "rgb": str(out_path.relative_to(images_dir.parent)),
             "segmentation": str(seg_path.relative_to(seg_dir.parent)),
+            "keypoints_debug": kp_debug_rel,
             "image_mode": "bw" if bool(cfg.get("save_bw", False)) else "rgb",
         },
         "markers": markers_info,
@@ -652,6 +861,15 @@ def main(cfg):
     seg_dir.mkdir(parents=True, exist_ok=True)
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
+    # Optional keypoints debug directory
+    save_kp_debug = bool(cfg.get("save_keypoint_debug_images", False))
+    if save_kp_debug:
+        kp_debug_dir = out_dir / "keypoints_debug"
+        kp_debug_dir.mkdir(parents=True, exist_ok=True)
+        kp_debug_dir_str = str(kp_debug_dir)
+    else:
+        kp_debug_dir_str = ""
+
     n_images = int(cfg.get("n_images", 1))
     start_time = time.time()
 
@@ -676,6 +894,7 @@ def main(cfg):
                 str(images_dir),
                 str(seg_dir),
                 str(metadata_dir),
+                kp_debug_dir_str,
             ) for i in range(n_images)
         ]
         for _ in tqdm(as_completed(futures), total=n_images, desc="Rendering"):
